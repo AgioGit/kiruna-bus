@@ -35,7 +35,7 @@ test('upcomingStops returns the next two future stops, or the first when none ar
   assert.deepEqual(upcomingStops(info, T0 + 1_000_000).map((s) => s.stopText), ['A']);
 });
 
-test('buildVehicles dedupes shared fixes onto the journey with the soonest forecast and flags stale', () => {
+test('buildVehicles dedupes shared fixes onto the soonest journey and hides expired positions', () => {
   const journeys = buildJourneys([
     { call: call({ id: 'now', journeyId: 1, seq: 1, at: 60 }), stopText: 'A' },
     { call: call({ id: 'later', journeyId: 2, seq: 1, at: 3600 }), stopText: 'A' },
@@ -49,12 +49,12 @@ test('buildVehicles dedupes shared fixes onto the journey with the soonest forec
   ]);
 
   const vehicles = buildVehicles({ journeys, positions, nowMs: T0 });
-  assert.equal(vehicles.length, 2);
+  assert.equal(vehicles.length, 1);
   const merged = vehicles.find((v) => v.callIds.includes('now'));
   assert.equal(merged.journeyId, 1);
   assert.deepEqual([...merged.callIds].sort(), ['later', 'now']);
   assert.equal(merged.stale, false);
-  assert.equal(vehicles.find((v) => v.journeyId === 3).stale, true);
+  assert.equal(vehicles.find((v) => v.journeyId === 3), undefined);
   assert.equal('forecastRank' in merged, false);
 });
 
@@ -176,13 +176,15 @@ test('concurrent requests share a single refresh', async () => {
 test('a failed position fetch keeps the old fix and triggers a rescan after the minimum interval', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  await tracker.getBuses();
+  const first = await tracker.getBuses();
 
   fake.state.failPositions = true;
   fake.state.now += 20_000;
   const degraded = await tracker.getBuses();
   assert.equal(degraded.vehicles.length, 1); // previous fix retained
   assert.ok(degraded.vehicles[0].ageMs >= 20_000);
+  assert.equal(degraded.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
+  assert.equal(degraded.vehicles[0].stale, true);
   assert.ok(degraded.error);
   assert.equal(fake.counts.calls, 2); // rescan not yet allowed (< 30 s)
 
@@ -191,6 +193,79 @@ test('a failed position fetch keeps the old fix and triggers a rescan after the 
   const recovered = await tracker.getBuses();
   assert.equal(fake.counts.calls, 4); // early rescan happened
   assert.equal(recovered.error, null);
+});
+
+test('missing positions are retained only through the exact three-minute boundary', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  const first = await tracker.getBuses();
+  const timestamp = first.vehicles[0].position.timestamp;
+  fake.api.getVehiclePosition = async () => null;
+  fake.state.now = Date.parse(timestamp) + 180_000;
+  const boundary = await tracker.getBuses();
+  assert.equal(boundary.vehicles.length, 1);
+  assert.equal(boundary.vehicles[0].position.timestamp, timestamp);
+  fake.state.now += 1;
+  const expired = await tracker.getBuses();
+  assert.deepEqual(expired.vehicles, []);
+  assert.match(expired.error, /no bus positions/);
+});
+
+test('an out-of-order position response does not replace a newer known fix', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  const first = await tracker.getBuses();
+  fake.api.getVehiclePosition = async () => ({
+    location: { lat: 67.8, lon: 20.2 }, timestamp: iso(-60),
+  });
+  fake.state.now += 20_000;
+  const older = await tracker.getBuses();
+  assert.deepEqual(older.vehicles[0].position, first.vehicles[0].position);
+});
+
+test('a bus missing from a successful departure scan keeps its last known fix until it expires', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  const first = await tracker.getBuses();
+  fake.api.getVehiclePosition = async () => null;
+  fake.state.now += 20_000;
+  await tracker.getBuses(); // request an early rescan
+  fake.api.getCalls = async () => ({ calls: [] });
+  fake.state.now += 20_000;
+  const missing = await tracker.getBuses();
+  assert.equal(missing.vehicles.length, 1);
+  assert.equal(missing.vehicles[0].journeyId, first.vehicles[0].journeyId);
+  assert.equal(missing.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
+  assert.equal(missing.vehicles[0].stale, true);
+  fake.state.now += 180_000;
+  assert.deepEqual((await tracker.getBuses()).vehicles, []);
+});
+
+test('a journey whose call ids change falls back to its previous fix and recovers without duplicates', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  const first = await tracker.getBuses();
+  const calls = fake.api.getCalls;
+  fake.api.getVehiclePosition = async () => null;
+  fake.state.now += 20_000;
+  await tracker.getBuses();
+  fake.api.getCalls = async (stop) => {
+    const response = await calls(stop);
+    response.calls[0].calls[0].id += '-new';
+    return response;
+  };
+  fake.state.now += 20_000;
+  const retained = await tracker.getBuses();
+  assert.equal(retained.vehicles.length, 1);
+  assert.equal(retained.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
+  fake.api.getVehiclePosition = async () => ({
+    location: { lat: 67.851, lon: 20.221 }, timestamp: new Date(fake.state.now).toISOString(),
+  });
+  fake.state.now += 20_000;
+  const recovered = await tracker.getBuses();
+  assert.equal(recovered.vehicles.length, 1);
+  assert.equal(recovered.vehicles[0].stale, false);
+  assert.deepEqual(recovered.vehicles[0].callIds, ['call-2-new']);
 });
 
 test('scan failure with no data throws, with old data it is reported and retried only after backoff', async () => {

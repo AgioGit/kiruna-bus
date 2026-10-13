@@ -24,11 +24,18 @@ database.
 - Live bus cards are grouped by line color in a stable order rather than
   reshuffling by ETA. They show line, destination, next stop, expected time,
   planned time when it differs, last update, and position freshness. Buses
-  whose next stop is more than 10 minutes away are hidden.
+  whose next stop is more than 10 minutes away are hidden. Late expected
+  times show a red `(+N min)` immediately after the time, including trip
+  stops and stop departures.
 - Select a bus card to pan to and highlight that bus; its tooltip closes after
   three seconds while the highlight remains. Click a bus marker to select it
   too, or select it again to clear it. The selected card previews its next
   three stops and offers the rest on demand, with expected times and delays.
+  Hovering or selecting a bus draws an animated dotted path along its rendered
+  route lane, including shared-road offsets and junction tapers, to its
+  current next stop (a direct connection until route geometry loads).
+  The dots render above route lines but below stop markers.
+  The dots stop moving when reduced motion is requested.
 - All bus stops shown as clickable circles; selecting one displays its
   departures and centers the map on that stop. Stops can also be selected
   through autocomplete or a map click.
@@ -40,12 +47,15 @@ database.
   the header; polling pauses in a hidden browser tab and resumes immediately
   when the tab becomes visible. Existing bus markers move in place rather
   than being recreated.
-- Positions older than three minutes are marked stale. Positions older than
-  15 minutes remain visible on the map but are omitted from the list unless
-  that bus is selected.
+- Missing buses retain their last known position and original Updated time,
+  including when their calls disappear from a scan. Positions older than
+  three minutes are hidden from both the map and list, even when selected;
+  they also expire between browser polls.
 - On phones and tablet portrait, stop search comes before the map and
   departures; tablet landscape and desktop use a map/sidebar layout. Bus
   and departure cards fit narrow screens without horizontal scrolling.
+  The desktop sidebar stays within the viewport and the live-bus panel
+  scrolls when expanding lines or trip details.
 - Touch-sized controls plus keyboard navigation for stop suggestions and live
   bus selection.
 - Light and dark themes: follows the system setting by default, with a header

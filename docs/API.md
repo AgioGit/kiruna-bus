@@ -238,7 +238,7 @@ the marker silently.
   flag. A call whose vehicle hasn't reported recently (trip finished,
   vehicle offline, or a scheduled-only journey with no vehicle assigned
   yet) still returns its last known fix. "In service" must be inferred
-  from how old `timestamp` is (the server treats >3 minutes as stale — see
+  from how old `timestamp` is (the server hides fixes older than 3 minutes — see
   `server/lib/tracker.js`).
 - At Kiruna's current scale there are ~45 unique stops and ~200+ unique
   active call ids town-wide at any time — fetching all of them requires

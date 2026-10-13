@@ -72,6 +72,16 @@ export function offsetRoutePath(path, pixels, map) {
   });
 }
 
+// Parts group matching lane styles, not travel order; shared paths may also
+// have been reversed so opposite-direction routes use the same lane layout.
+export function renderedRouteLocations(pathOrder, renderedPaths) {
+  return pathOrder.flatMap(({ partIndex, pathIndex, reversed }, i) => {
+    const path = renderedPaths[partIndex][pathIndex];
+    const ordered = reversed ? [...path].reverse() : path;
+    return ordered.slice(i ? 1 : 0).map(([lat, lon]) => ({ lat, lon }));
+  });
+}
+
 function nearestPoint(point, path, map, zoom) {
   let closest = { distanceSquared: Infinity, point: null };
   let previous = map.project(path[0], zoom);

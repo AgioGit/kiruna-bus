@@ -524,6 +524,13 @@ button.vehicle-card {
   text-transform: uppercase;
 }
 
+.eta-delay {
+  margin-left: 0.35rem;
+  color: var(--color-disturbance);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .vehicle-card-next {
   font-size: 0.87rem;
 }
@@ -672,6 +679,21 @@ button.vehicle-card {
   opacity: 0.45;
 }
 
+.vehicle-next-stop-path {
+  filter: drop-shadow(0 0 1px #17263c);
+  animation: next-stop-flow 1s linear infinite;
+}
+
+@keyframes next-stop-flow {
+  to { stroke-dashoffset: -12; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vehicle-next-stop-path {
+    animation: none;
+  }
+}
+
 .theme-toggle {
   margin-left: auto;
   min-width: 44px;
@@ -733,6 +755,8 @@ button.vehicle-card {
   body {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
+    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
   }
 
@@ -754,11 +778,23 @@ button.vehicle-card {
     display: flex;
     order: 1;
     min-width: 0;
+    min-height: 0;
     flex-direction: column;
     gap: 0.75rem;
     overflow-y: auto;
     overscroll-behavior: contain;
     padding-right: 0.25rem;
+  }
+
+  .side-panel > * {
+    flex-shrink: 0;
+  }
+
+  .live-buses-panel {
+    flex: 1 1 auto;
+    min-height: 12rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 }
 

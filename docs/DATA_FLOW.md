@@ -25,7 +25,9 @@ Browser ──► /api/buses, /api/stops, /api/<BorealEndpoint> ──► server
     request using the Boreal-corrected clock.
   - Refresh is lazy (only when a request finds data expired), concurrent
     requests share one refresh, and failures keep serving the last data with
-    `error` set.
+    `error` set. Missing fixes retain their GPS timestamp and are marked
+    stale; cached journey fixes also survive disappearing/changing call ids.
+    Positions older than three minutes are omitted.
 - `/api/stops` — `[{ id, text, location }]`, coordinates resolved once.
 - `/api/<BorealEndpoint>` — allow-listed passthrough with short TTL caches
   (`passthrough.js`) that injects the Kiruna profile headers, so the
@@ -100,7 +102,7 @@ responses tied to stale UI state are discarded.
    ```
    refreshLiveVehicles()                     [live-vehicles.js]
      GET /api/buses
-     → drop buses whose next stop is > 10 min away
+     → drop buses whose next stop is > 10 min away or position is > 3 min old
      → store.set({ liveVehicles, journeyStops, errors.vehicles = data.error })
      → mergeLineRoutes(data.lineRoutes)      [routes.js]
           add to lineRoutes; GetMapRoute for each new routeId
@@ -112,6 +114,9 @@ responses tied to stale UI state are discarded.
    very first request can take several seconds while the server warms up.
    The browser never talks to Boreal's scan endpoints; the server's caches
    decide when Boreal is actually contacted (§0).
+   A local expiry timer removes old positions between polls using the
+   response's server clock plus elapsed client time, without changing GPS
+   timestamps or making another request.
 
 2. **`pollCalls`** (60s, only while a stop is selected) —
    `fetchCallsForSelectedStop` [`calls.js`] calls `GetCalls` (via the
@@ -165,6 +170,15 @@ Subscribed to the store; updates only layers whose inputs change:
   selection change (tracked via a module-level `lastSelectedJourneyId`)
   the map pans to it once and opens its tooltip for 3 seconds. Markers are
   reused and moved as new fixes arrive; clicking one selects its journey.
+  Hovered and selected buses also have an animated dotted connection to the
+  current next stop. It follows the rendered route lane between the two
+  projected positions, including pixel offsets and junction tapers, and
+  updates with zoom and line filtering. Route-part order and orientation
+  are restored before clipping the connection, since lane styles group
+  disjoint stretches and shared runs may be reversed. Dots are above routes
+  and below stop markers, with a direct connection until route
+  geometry is available; missing stop coordinates omit the connection.
+  The animation respects reduced-motion preferences.
 - **Stops**: a small `circleMarker` for every entry in
   `state.stopLocations`, on its own layer between the routes and the
   vehicles, with the stop name as a tooltip. The currently selected stop
@@ -192,15 +206,18 @@ Also subscribed to the store; re-renders only the pieces whose inputs change:
   completely unknown (normally already populated via `/api/buses`).
 - **Live bus cards**: same `state.liveVehicles` data as the map
   markers, filtered by `activeLineIds` and to buses whose last position
-  fix is under 15 minutes old (plus the selected bus), one card per physical
+  fix is at most three minutes old (including the selected bus), one card per physical
   bus. Each selectable button carries a `data-journey-id`; a delegated click
   listener (bound once, since the list's `innerHTML` is rebuilt every
   tick) calls `selectVehicle(journeyId)` [`vehicleSelection.js`], which
   toggles `state.selectedVehicleJourneyId` — pure client-side state, no
   refetch — previewing the next three stops from `state.journeyStops`
   (with a disclosure for the rest) and highlighting the map marker.
-  A shared early/late difference is summarized once above the stops.
+  Late ETAs show a red `(+N min)` immediately after each timestamp. A
+  shared early difference is summarized once above the trip stops.
   Keyboard focus is preserved across position updates.
+  On desktop the page is bounded to the viewport; the live-bus panel and
+  sidebar scroll rather than letting expanded content escape vertically.
 - **Departure cards**: from `state.calls` (the selected stop's flattened
   departures), filtered by `activeLineIds`, joined against
   `state.messages` for disruption banners, with a cancelled-stop banner

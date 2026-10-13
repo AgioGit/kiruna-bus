@@ -7,12 +7,14 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   const markers = [];
   const groups = [];
   const routes = [];
+  const projections = [];
   const circles = [];
   const map = {
     zoom: 14,
+    panes: {},
     handlers: {},
     setView() { return this; },
-    createPane() { return { style: {} }; },
+    createPane(name) { return this.panes[name] = { style: {} }; },
     on(event, callback) { this.handlers[event] = callback; },
     getZoom() { return this.zoom; },
     project([lat, lon], zoom) {
@@ -62,7 +64,7 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
         setStyle(style) { this.options = { ...this.options, ...style }; },
         setLatLngs(next) { this.position = next; this.latLngUpdates = (this.latLngUpdates ?? 0) + 1; },
       };
-      routes.push(polyline);
+      (options.className === 'vehicle-next-stop-path' ? projections : routes).push(polyline);
       return polyline;
     },
     marker(position, options) {
@@ -85,6 +87,8 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   };
 
   initMap('map');
+  assert.ok(map.panes.routes.style.zIndex < map.panes.nextStops.style.zIndex);
+  assert.ok(map.panes.nextStops.style.zIndex < map.panes.stops.style.zIndex);
   const bus = {
     journeyId: 7,
     lineId: 123,
@@ -118,6 +122,16 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(stopLayer.clearCount, stopRenders);
   assert.equal(routes.length, 1);
 
+  store.set({ hoveredVehicleJourneyId: 7 });
+  assert.equal(projections.length, 1);
+  const projection = projections[0];
+  assert.equal(projection.options.color, '#ffffff');
+  assert.equal(projection.options.dashArray, '1 11');
+  assert.equal(projection.options.interactive, false);
+  assert.deepEqual(projection.position[0], marker.position);
+  assert.deepEqual(projection.position.at(-1), [67.86, 20.23]);
+  assert.equal(map.lastPan, undefined);
+
   store.set({
     selectedVehicleJourneyId: 7,
     journeyStops: new Map([[7, [{ stopText: 'Square (22)', sequenceNumber: 1 }]]]),
@@ -126,6 +140,8 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(originalRoute.options.weight, 7);
   assert.equal(circles.at(-1).radius, 6);
   assert.deepEqual(map.lastPan, [67.851, 20.221]);
+  store.set({ hoveredVehicleJourneyId: null });
+  assert.equal(projections.length, 1); // selection keeps the same animated line
 
   store.set({ activeLineIds: new Set() });
   assert.equal(routes.length, 1);
@@ -134,6 +150,8 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(routes.length, 1);
   assert.equal(originalRoute.addCount, 2);
   assert.equal(originalRoute.options.weight, 7);
+  assert.deepEqual(groups[3].removed, [projection]);
+  assert.equal(projections.length, 2);
 
   store.set({
     routeGeometry: new Map([
@@ -185,6 +203,22 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
     liveVehicles: [{ ...bus, position: { ...bus.position, location: overlapGps } }],
   });
   assert.notDeepEqual(visibleMarker.position, [overlapGps.lat, overlapGps.lon]);
+  const assertProjectionOnLane = () => {
+    const lane = sharedPaths[0].position[0].map((point) => map.project(point, map.zoom));
+    for (const latLng of projections.at(-1).position.slice(0, -1)) {
+      const point = map.project(latLng, map.zoom);
+      const distance = Math.min(...lane.slice(1).map((to, i) => {
+        const from = lane[i];
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const fraction = Math.max(0, Math.min(1,
+          ((point.x - from.x) * dx + (point.y - from.y) * dy) / (dx * dx + dy * dy)));
+        return Math.hypot(point.x - from.x - fraction * dx, point.y - from.y - fraction * dy);
+      }));
+      assert.ok(distance < 0.000001, `Dotted path is ${distance} pixels away from its rendered lane`);
+    }
+  };
+  assertProjectionOnLane();
   const beforeZoomMarker = visibleMarker.position;
   const beforeZoom = structuredClone(sharedPaths[0].position);
   map.zoom = 15;
@@ -192,6 +226,7 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(routes.length, beforeOverlap + 2);
   assert.notDeepEqual(sharedPaths[0].position, beforeZoom);
   assert.notDeepEqual(visibleMarker.position, beforeZoomMarker);
+  assertProjectionOnLane();
   assert.deepEqual(sharedPaths.map((route) => route.latLngUpdates), [1, 1]);
   assert.deepEqual(sharedPaths[0].position[0][0], beforeZoom[0][0]);
 
@@ -208,4 +243,11 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(sharedPaths[1].addCount, 2);
   assert.notDeepEqual(visibleMarker.position, [overlapGps.lat, overlapGps.lon]);
   assert.equal(routes.at(-1).options.dashArray, undefined);
+  const lastProjection = projections.at(-1);
+  store.set({ selectedVehicleJourneyId: null, hoveredVehicleJourneyId: 7 });
+  assert.equal(projections.at(-1), lastProjection); // hover survives deselection
+  store.set({ hoveredVehicleJourneyId: null });
+  assert.ok(groups[3].removed.includes(lastProjection));
+  store.set({ hoveredVehicleJourneyId: 7, liveVehicles: [] });
+  assert.ok(groups[2].removed.includes(visibleMarker));
 });

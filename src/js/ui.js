@@ -4,8 +4,8 @@ import { searchStops, selectStopByText, clearSelectedStop, cancelStopSearch } fr
 import { formatTime, minutesUntil } from './clock.js';
 import { colorForLineId, lineColorOrderForId, textColorForLineId } from './lineColors.js';
 import { selectVehicle } from './vehicleSelection.js';
+import { MAX_POSITION_AGE_MS } from './live-vehicles.js';
 
-const LIST_MAX_POSITION_AGE_MS = 15 * 60 * 1000;
 const TRIP_PREVIEW_STOPS = 3;
 
 export function initUi() {
@@ -106,8 +106,7 @@ function renderVehicleCards(state) {
   const visibleVehicles = state.liveVehicles.filter(
     (bus) =>
       (bus.lineId === undefined || state.activeLineIds.has(bus.lineId)) &&
-      (bus.journeyId === state.selectedVehicleJourneyId ||
-        bus.ageMs == null || Number.isNaN(bus.ageMs) || bus.ageMs <= LIST_MAX_POSITION_AGE_MS)
+      (bus.ageMs == null || Number.isNaN(bus.ageMs) || bus.ageMs <= MAX_POSITION_AGE_MS)
   ).sort((a, b) => {
     const byColor = lineColorOrderForId(a.lineId) - lineColorOrderForId(b.lineId);
     if (byColor) return byColor;
@@ -160,7 +159,7 @@ function renderVehicleCards(state) {
     parts.push(`<li><${tag} class="vehicle-card${selected ? ' vehicle-card--selected' : ''}${expanded ? ' vehicle-card--expanded' : ''}${bus.stale ? ' vehicle-card--stale' : ''}"${attributes}>
       <span class="vehicle-card-main"><span class="line-badge" style="background:${color};color:${foreground}">${escapeHtml(lineText)}</span>
         <strong class="vehicle-destination">${escapeHtml(destination)}</strong>
-        <span class="vehicle-time"><span class="vehicle-time-label">ETA</span>${expected}</span></span>
+        <span class="vehicle-time"><span class="vehicle-time-label">ETA</span>${expected}${lateEta(bus.nextStop?.plannedTime, bus.nextStop?.forecastTime)}</span></span>
       <span class="vehicle-card-next">Next: ${escapeHtml(nextStopText)}${planned !== '—' && planned !== expected ? ` <span class="hint">(planned ${planned})</span>` : ''}</span>
       <span class="vehicle-card-meta"><span>Updated ${formatTime(bus.position.timestamp)}</span>${status}</span>
     </${tag}>${expanded ? renderTripDetails(state, bus) : ''}</li>`);
@@ -182,7 +181,8 @@ function renderVehicleCards(state) {
 function renderTripDetails(state, bus) {
   const stops = state.journeyStops.get(bus.journeyId) ?? [];
   const delays = stops.map((stop) => delayLabel(stop.plannedTime, stop.forecastTime));
-  const commonDelay = delays.length && delays[0] && delays.every((delay) => delay === delays[0]) ? delays[0] : '';
+  const commonDelay = delays.length && delays[0].endsWith('early') &&
+    delays.every((delay) => delay === delays[0]) ? delays[0] : '';
   const parts = [
     `<div id="trip-${bus.journeyId}" class="vehicle-trip" aria-label="Upcoming stops">`,
     `<div class="trip-heading"><h3>Upcoming stops</h3>${commonDelay ? `<span class="trip-delay">${commonDelay}</span>` : ''}</div>`,
@@ -194,7 +194,8 @@ function renderTripDetails(state, bus) {
       const planned = formatTime(stop.plannedTime);
       const expected = formatTime(stop.forecastTime ?? stop.plannedTime);
       const plannedLabel = planned !== '—' && planned !== expected ? `Planned ${planned}` : '';
-      const change = !commonDelay && delay ? `<span class="trip-stop-change">${delay}</span>` : '';
+      const late = lateEta(stop.plannedTime, stop.forecastTime);
+      const change = late || (!commonDelay && delay ? `<span class="trip-stop-change">${delay}</span>` : '');
       return `<li class="trip-stop"${plannedLabel ? ` title="${escapeHtml(plannedLabel)}"` : ''}>
         <span class="trip-stop-name">${escapeHtml(stripStopId(stop.stopText))}</span>
         <span class="trip-stop-time">${expected}${change}</span>
@@ -409,10 +410,10 @@ function renderArrivals(state) {
       parts.push(`<li class="departure-card">
         <div class="departure-main"><span class="line-badge" style="background:${bg};color:${fg}">${escapeHtml(call.line)}</span>
           <strong class="departure-destination">${escapeHtml(call.destination)}</strong>
-          <span class="departure-time"><span class="visually-hidden">Expected departure </span>${expected}</span></div>
+          <span class="departure-time"><span class="visually-hidden">Expected departure </span>${expected}${lateEta(forecast?.plannedTime, forecast?.forecastTime)}</span></div>
         <div class="departure-meta">${planned !== '—' ? `<span>Planned ${planned}</span>` : ''}
           ${countdown ? `<span>${countdown}</span>` : ''}
-          ${delay ? `<span class="trip-delay">${delay}</span>` : ''}
+          ${delay.endsWith('early') ? `<span class="trip-delay">${delay}</span>` : ''}
           ${quality ? `<span>${escapeHtml(quality)}</span>` : ''}</div>`);
       if (affected.length) {
         parts.push(`<p class="departure-message">${affected.map((m) => escapeHtml(m.text)).join('; ')}</p>`);
@@ -431,6 +432,13 @@ function delayLabel(plannedTime, forecastTime) {
   if (!Number.isFinite(difference)) return '';
   const minutes = Math.round(difference / 60000);
   return minutes > 0 ? `${minutes} min late` : minutes < 0 ? `${-minutes} min early` : '';
+}
+
+function lateEta(plannedTime, forecastTime) {
+  if (!plannedTime || !forecastTime) return '';
+  const difference = Date.parse(forecastTime) - Date.parse(plannedTime);
+  if (!Number.isFinite(difference) || difference <= 0) return '';
+  return `<span class="eta-delay">(+${Math.max(1, Math.round(difference / 60000))} min)</span>`;
 }
 
 function renderStatus(state) {

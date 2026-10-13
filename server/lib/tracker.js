@@ -3,8 +3,8 @@ import { runPooled } from './pool.js';
 export const UPCOMING_STOP_COUNT = 2;
 
 // The API has no "in service" flag; the only freshness signal is how old
-// VehiclePosition.timestamp is. Older positions are flagged stale (shown,
-// not hidden) because an occasional slow GPS update is normal.
+// VehiclePosition.timestamp is. Missing fixes retain their original timestamp
+// and are shown for at most three minutes.
 export const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 
 const DEFAULT_OPTIONS = {
@@ -162,7 +162,7 @@ function mergeVehicles(a, b) {
 // physical bus. When several journeys share a fix, the one whose next
 // forecast is soonest in the future supplies the line/destination/next-stop
 // metadata (so scan-completion order can't mislabel a bus).
-export function buildVehicles({ journeys, positions, nowMs }) {
+export function buildVehicles({ journeys, positions, nowMs, unavailableCallIds = new Set() }) {
   const byKey = new Map();
 
   for (const [journeyId, info] of journeys) {
@@ -170,8 +170,9 @@ export function buildVehicles({ journeys, positions, nowMs }) {
       const position = positions.get(callId);
       if (!position?.location) continue;
 
-      const key = positionKey(position);
       const ageMs = nowMs - Date.parse(position.timestamp);
+      if (!Number.isFinite(ageMs) || ageMs > STALE_THRESHOLD_MS) continue;
+      const key = positionKey(position);
       const upcoming = upcomingStops(info, nowMs, Number.POSITIVE_INFINITY);
       const [nextStop, followingStop] = upcoming;
       const forecastMs = Date.parse(nextStop?.forecastTime ?? '');
@@ -191,7 +192,7 @@ export function buildVehicles({ journeys, positions, nowMs }) {
         routeId: info.routeId,
         callIds: [callId],
         ageMs,
-        stale: !Number.isNaN(ageMs) && ageMs > STALE_THRESHOLD_MS,
+        stale: unavailableCallIds.has(callId),
         forecastRank,
         nextStop: nextStop ?? { stopText: null, plannedTime: null, forecastTime: null },
         followingStop: followingStop ?? null,
@@ -261,6 +262,8 @@ export function createTracker({ api, now = Date.now, options = {} }) {
   let positionsAt = Number.NEGATIVE_INFINITY;
   let positionsDirty = false;
   let positionsError = null;
+  let unavailableCallIds = new Set();
+  const lastKnownJourneys = new Map();
 
   let refreshing = null;
 
@@ -364,25 +367,36 @@ export function createTracker({ api, now = Date.now, options = {} }) {
     const callIds = [...new Set([...journeys.values()].flatMap((info) => info.positionCallIds))];
     const results = await runPooled(callIds, opt.positionConcurrency, (callId) => api.getVehiclePosition(callId));
 
-    // A failed fetch keeps the previous fix (it simply ages into "stale")
-    // and asks for an early rescan, since the call id may no longer exist.
+    // Keep the actual GPS timestamp, not the time of this fetch. The journey
+    // cache also covers calls disappearing or changing ids during a scan.
     const next = new Map();
-    let failed = 0;
+    const unavailable = new Set();
     results.forEach((res, i) => {
       const callId = callIds[i];
-      if (res.status === 'fulfilled' && res.value?.location) {
-        next.set(callId, res.value);
+      const previous = positions.get(callId);
+      const incoming = res.status === 'fulfilled' ? res.value : null;
+      if (incoming?.location && Number.isFinite(Date.parse(incoming.timestamp))) {
+        next.set(callId, previous && Date.parse(previous.timestamp) > Date.parse(incoming.timestamp)
+          ? previous : incoming);
         return;
       }
-      if (res.status === 'rejected') failed += 1;
-      if (positions.has(callId)) next.set(callId, positions.get(callId));
+      unavailable.add(callId);
+      if (previous) next.set(callId, previous);
     });
 
     positions = next;
+    unavailableCallIds = unavailable;
+    for (const [journeyId, info] of journeys) {
+      const known = new Map(info.positionCallIds
+        .filter((id) => positions.has(id))
+        .map((id) => [id, positions.get(id)]));
+      if (known.size) lastKnownJourneys.set(journeyId, { info, positions: known });
+    }
     positionsAt = now();
     positionsDirty = false;
-    const gotFix = results.some((res) => res.status === 'fulfilled' && res.value?.location);
-    if (failed || (callIds.length && !gotFix)) rescanRequested = true;
+    const gotFix = results.some((res) => res.status === 'fulfilled' && res.value?.location &&
+      Number.isFinite(Date.parse(res.value.timestamp)));
+    if (unavailable.size) rescanRequested = true;
     positionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.' : null;
   }
 
@@ -416,7 +430,7 @@ export function createTracker({ api, now = Date.now, options = {} }) {
       // With data in hand, a slow Boreal must not stall the response: wait a
       // bit, then serve what we have while the refresh finishes in the background.
       const refresh = refreshIfNeeded();
-      if (journeys.size) {
+      if (journeys.size || lastKnownJourneys.size) {
         let timer;
         await Promise.race([refresh, new Promise((resolve) => (timer = setTimeout(resolve, opt.maxWaitMs)))]);
         clearTimeout(timer);
@@ -424,14 +438,39 @@ export function createTracker({ api, now = Date.now, options = {} }) {
         await refresh;
       }
       const error = scanError ?? positionsError;
-      if (!journeys.size && error) throw new Error(error);
-
       const nowMs = serverNow();
+      const displayJourneys = new Map(journeys);
+      const displayPositions = new Map(positions);
+      const unavailable = new Set(unavailableCallIds);
+      for (const [journeyId, cached] of lastKnownJourneys) {
+        const fresh = new Map([...cached.positions].filter(([, position]) => {
+          const age = nowMs - Date.parse(position.timestamp);
+          return Number.isFinite(age) && age <= STALE_THRESHOLD_MS;
+        }));
+        if (!fresh.size) {
+          lastKnownJourneys.delete(journeyId);
+          continue;
+        }
+        const current = journeys.get(journeyId);
+        if (current?.positionCallIds.some((id) => {
+          const position = positions.get(id);
+          return position && nowMs - Date.parse(position.timestamp) <= STALE_THRESHOLD_MS;
+        })) continue;
+        displayJourneys.set(journeyId, { ...(current ?? cached.info), positionCallIds: [...fresh.keys()] });
+        for (const [id, position] of fresh) {
+          displayPositions.set(id, position);
+          unavailable.add(id);
+        }
+      }
+      if (!displayJourneys.size && error) throw new Error(error);
+
       return {
         generatedAt: new Date(now()).toISOString(),
         serverTime: new Date(nowMs).toISOString(),
         error,
-        vehicles: buildVehicles({ journeys, positions, nowMs }),
+        vehicles: buildVehicles({
+          journeys: displayJourneys, positions: displayPositions, nowMs, unavailableCallIds: unavailable,
+        }),
         lineRoutes: Object.fromEntries([...lineRoutes].map(([lineId, routeIds]) => [lineId, [...routeIds]])),
       };
     },

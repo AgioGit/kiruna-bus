@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { markerPositionOnRoute, offsetRoutePath } from '../src/js/routeOffset.js';
+import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from '../src/js/routeOffset.js';
+import { routePartsForVisibleRoutes } from '../src/js/routeOverlap.js';
+import { pathToNextStop } from '../src/js/routeHeading.js';
 
 function testMap(zoom = 1) {
   return {
@@ -59,4 +61,38 @@ test('nearby buses follow their own lane, but unshared and off-route buses keep 
     markerPositionOnRoute({ lat: 0, lon: 0.5 }, [parts[0]], [[offsetRoutePath(shared, 2.5, zoomedMap)]], zoomedMap),
     [0.0125, 0.5]
   );
+});
+
+test('next-stop dots use the rendered lane and follow its taper through shared and unshared runs', () => {
+  const points = Array.from({ length: 6 }, (_, lon) => ({ lat: 0, lon }));
+  const routes = [
+    { key: 'bus', color: '#f9a825', geometry: { locations: [...points].reverse() } },
+    { key: 'other', color: '#7b1fa2', geometry: { locations: [
+      points[1], points[2], { lat: 1, lon: 2.5 }, points[3], points[4],
+    ] } },
+  ];
+  const route = routePartsForVisibleRoutes(routes)[0];
+  const map = testMap();
+  const render = (map) => route.parts.map((part) =>
+    part.paths.map((path) => offsetRoutePath(path, part.laneIndex * 5, map)));
+  const rendered = render(map);
+  const locations = renderedRouteLocations(route.pathOrder, rendered);
+  assert.deepEqual(locations[0], points[5]);
+  assert.deepEqual(locations.at(-1), points[0]);
+  assert.ok(locations.every((point, i) => i === 0 || point.lon <= locations[i - 1].lon));
+  assert.equal(route.parts.find((part) => part.shared).paths.length, 2);
+  assert.deepEqual(locations.filter((point) => Number.isInteger(point.lon)),
+    [...points].reverse());
+
+  const start = markerPositionOnRoute({ lat: 0, lon: 3.5 }, route.parts, rendered, map);
+  const path = pathToNextStop({ lat: start[0], lon: start[1] }, { locations }, { lat: 0, lon: 1.5 });
+  assert.deepEqual(path[0], start);
+  assert.ok(path.some(([lat, lon]) => lat === 0.025 && lon > 3));
+  assert.ok(path.some(([lat, lon]) => lat === 0.025 && lon < 2));
+  assert.ok(path.some(([lat, lon]) => lat === 0 && lon === 3));
+  assert.ok(path.some(([lat, lon]) => lat === 0 && lon === 2));
+
+  const zoomed = renderedRouteLocations(route.pathOrder, render(testMap(2)));
+  assert.ok(zoomed.some((point) => point.lat === 0.0125));
+  assert.ok(zoomed.every((point) => point.lat <= 0.0125));
 });

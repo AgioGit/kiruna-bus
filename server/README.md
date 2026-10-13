@@ -32,8 +32,10 @@ zero when nobody is looking).
 - Vehicle positions: at most every 15 s.
 - Passthrough TTLs: `GetCalls` 30 s, `GetVehiclePosition(s)` 15 s, static-ish
   data (config, lines, stops, routes) 1 h.
-- If Boreal is down the last known data keeps being served; positions age into
-  "stale" and the response carries an `error`.
+- Missing positions keep their last known fix with its original GPS timestamp
+  and are marked stale. This also covers journeys disappearing from a scan
+  or changing call ids. Fixes older than three minutes are omitted.
+  If Boreal is down, the response carries an `error`.
 
 ## Configuration (environment variables)
 

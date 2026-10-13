@@ -2,21 +2,23 @@ import { getConfig } from './config.js';
 import { store } from './appState.js';
 import { selectStopsNearLocation, selectStopArea } from './stops.js';
 import { colorForLineId } from './lineColors.js';
-import { headingAlongRoute } from './routeHeading.js';
+import { headingAlongRoute, pathToNextStop } from './routeHeading.js';
 import { routePartsForVisibleRoutes } from './routeOverlap.js';
-import { markerPositionOnRoute, offsetRoutePath } from './routeOffset.js';
+import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from './routeOffset.js';
 import { selectVehicle } from './vehicleSelection.js';
 
 let map = null;
 let vehicleLayer = null;
 let routeLayer = null;
 let stopLayer = null;
+let nextStopLayer = null;
 let stopMarker = null;
 let stopMarkerId = null;
 let mapResizeObserver = null;
 let resizeFrame = null;
 const vehicleMarkers = new Map();
 const routePolylines = new Map();
+const nextStopPolylines = new Map();
 let lastRenderedRouteId = null;
 let lastRenderedUpcomingKey = '';
 // Tracks the previously-applied vehicle selection so panning/opening the
@@ -35,6 +37,7 @@ const ROUTE_WEIGHT = 4;
 const LANE_SPACING = ROUTE_WEIGHT + 1;
 const ROUTE_PANE = 'routes';
 const STOP_PANE = 'stops';
+const NEXT_STOP_PANE = 'nextStops';
 
 // Assumes the global `L` (Leaflet, loaded via <script> in index.html - see
 // docs/initial_plan.md for why a CDN script tag was used instead of a bundler).
@@ -47,14 +50,17 @@ export function initMap(containerId) {
   const tileUrl = cfg?.tiles?.urlTemplate ?? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   L.tileLayer(tileUrl, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
-  // Draw order, bottom to top: tiles, routes, stops, buses (markerPane).
+  // Draw order: tiles, routes, next-stop paths, stops, buses (markerPane).
   // Separate panes keep re-added route polylines from landing over stops.
   map.createPane(ROUTE_PANE).style.zIndex = 410;
   map.createPane(STOP_PANE).style.zIndex = 420;
+  map.createPane(NEXT_STOP_PANE).style.zIndex = 415;
   routeLayer = L.layerGroup().addTo(map);
   routePolylines.clear();
   stopLayer = L.layerGroup().addTo(map);
   vehicleLayer = L.layerGroup().addTo(map);
+  nextStopLayer = L.layerGroup().addTo(map);
+  nextStopPolylines.clear();
 
   observeMapSize(document.getElementById(containerId));
 
@@ -76,6 +82,7 @@ export function initMap(containerId) {
           entry.polylines[i].setLatLngs(entry.renderedPaths[i]);
         }
       });
+      entry.renderedLocations = renderedRouteLocations(entry.pathOrder, entry.renderedPaths);
     }
     renderVehicles(store.get());
   });
@@ -199,7 +206,7 @@ function renderRoutes(state, selectedRouteId) {
     }
   }
   for (const route of routePartsForVisibleRoutes(routes)) {
-    const { key, geometry, color, layoutKey } = route;
+    const { key, geometry, color, layoutKey, pathOrder } = route;
     const selected = state.selectedVehicleJourneyId != null && route.routeId === selectedRouteId;
     const styleFor = () => ({
       pane: ROUTE_PANE,
@@ -214,6 +221,7 @@ function renderRoutes(state, selectedRouteId) {
       entry = {
         polylines: renderedPaths.map((paths) => L.polyline(paths, styleFor()).addTo(routeLayer)),
         renderedPaths, parts: route.parts, geometry, layoutKey, color, selected, visible: true,
+        pathOrder, renderedLocations: renderedRouteLocations(pathOrder, renderedPaths),
       };
       routePolylines.set(key, entry);
     } else {
@@ -255,6 +263,7 @@ function renderVehicles(state) {
   const isNewSelection = selectedId != null && selectedId !== lastSelectedJourneyId;
   let selectedLatLng = null;
   const seen = new Set();
+  const projected = new Set();
   const journeyCounts = new Map();
   for (const bus of state.liveVehicles) {
     if (bus.journeyId != null) journeyCounts.set(bus.journeyId, (journeyCounts.get(bus.journeyId) ?? 0) + 1);
@@ -285,6 +294,32 @@ function renderVehicles(state) {
     if (isSelected) wrapperClasses.push('vehicle-icon-wrapper--selected');
     const isHovered = bus.journeyId != null && bus.journeyId === state.hoveredVehicleJourneyId;
     if (isHovered) wrapperClasses.push('vehicle-icon-wrapper--hover');
+    if (isSelected || isHovered) {
+      const path = pathToNextStop(
+        { lat: displayPosition[0], lon: displayPosition[1] },
+        routeEntry?.visible ? { locations: routeEntry.renderedLocations } : state.routeGeometry.get(bus.routeId),
+        nextStopLocation
+      );
+      if (path) {
+        projected.add(key);
+        let projection = nextStopPolylines.get(key);
+        if (!projection) {
+          projection = L.polyline(path, {
+            pane: NEXT_STOP_PANE,
+            color: '#ffffff',
+            weight: 4,
+            opacity: 1,
+            dashArray: '1 11',
+            lineCap: 'round',
+            interactive: false,
+            className: 'vehicle-next-stop-path',
+          }).addTo(nextStopLayer);
+          nextStopPolylines.set(key, projection);
+        } else {
+          projection.setLatLngs(path);
+        }
+      }
+    }
     const markerStyle = heading == null
       ? `background-color: ${color};`
       : `transform: rotate(${heading}deg); border-bottom-color: ${color};`;
@@ -331,6 +366,11 @@ function renderVehicles(state) {
     if (seen.has(key)) continue;
     vehicleLayer.removeLayer(entry.marker);
     vehicleMarkers.delete(key);
+  }
+  for (const [key, projection] of nextStopPolylines) {
+    if (projected.has(key)) continue;
+    nextStopLayer.removeLayer(projection);
+    nextStopPolylines.delete(key);
   }
 
   if (selectedId !== lastSelectedJourneyId) {

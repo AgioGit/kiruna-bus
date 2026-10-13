@@ -28,6 +28,7 @@ export function routePartsForVisibleRoutes(routes) {
   return routes.map((route) => {
     const { locations } = route.geometry;
     const parts = new Map();
+    const pathOrder = [];
     const labels = [];
     let current = null;
     let path = [];
@@ -35,7 +36,13 @@ export function routePartsForVisibleRoutes(routes) {
     const finishPath = () => {
       if (!path.length) return;
       // Reverse shared runs consistently even when two journeys travel opposite ways.
-      if (current.shared && pointKey(path.at(-1)) < pointKey(path[0])) path.reverse();
+      const reversed = current.shared && pointKey(path.at(-1)) < pointKey(path[0]);
+      if (reversed) path.reverse();
+      pathOrder.push({
+        partIndex: [...parts.keys()].indexOf(current.key),
+        pathIndex: current.paths.length,
+        reversed,
+      });
       parts.get(current.key).paths.push(path.map(({ lat, lon }) => [lat, lon]));
     };
 
@@ -62,6 +69,6 @@ export function routePartsForVisibleRoutes(routes) {
     }
     finishPath();
 
-    return { ...route, layoutKey: labels.join('|'), parts: [...parts.values()] };
+    return { ...route, layoutKey: labels.join('|'), parts: [...parts.values()], pathOrder };
   });
 }

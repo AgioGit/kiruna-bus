@@ -24,6 +24,35 @@ export function headingAlongRoute(position, geometry, nextStopLocation) {
     : bearing(vehicleMatch.to, vehicleMatch.from);
 }
 
+export function pathToNextStop(position, geometry, nextStopLocation) {
+  if (position?.lat == null || position?.lon == null ||
+      nextStopLocation?.lat == null || nextStopLocation?.lon == null) return null;
+
+  const start = [position.lat, position.lon];
+  const end = [nextStopLocation.lat, nextStopLocation.lon];
+  const locations = geometry?.locations;
+  if (!Array.isArray(locations) || locations.length < 2) return [start, end];
+
+  const latitudeScale = Math.cos((position.lat * Math.PI) / 180);
+  const vehicleMatch = nearestSegment(position, locations, latitudeScale);
+  const stopMatch = nearestSegment(nextStopLocation, locations, latitudeScale);
+  if (!vehicleMatch || !stopMatch) return [start, end];
+
+  const forward = stopMatch.progress >= vehicleMatch.progress;
+  const between = locations.slice(
+    Math.floor(Math.min(vehicleMatch.progress, stopMatch.progress)) + 1,
+    Math.ceil(Math.max(vehicleMatch.progress, stopMatch.progress))
+  );
+  if (!forward) between.reverse();
+  return [
+    start,
+    vehicleMatch.point,
+    ...between.map(({ lat, lon }) => [lat, lon]),
+    stopMatch.point,
+    end,
+  ];
+}
+
 function nearestSegment(location, locations, latitudeScale) {
   const point = { x: location.lon * latitudeScale, y: location.lat };
   let nearest = null;
@@ -47,7 +76,10 @@ function nearestSegment(location, locations, latitudeScale) {
     const distanceSquared = (point.x - closestX) ** 2 + (point.y - closestY) ** 2;
 
     if (!nearest || distanceSquared < nearest.distanceSquared) {
-      nearest = { distanceSquared, from, to, progress: i + t };
+      nearest = {
+        distanceSquared, from, to, progress: i + t,
+        point: [from.lat + t * (to.lat - from.lat), from.lon + t * (to.lon - from.lon)],
+      };
     }
   }
 

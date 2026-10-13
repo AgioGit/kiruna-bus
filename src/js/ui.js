@@ -243,10 +243,15 @@ function lineTextFor(state, lineId) {
 function renderLineFilters(state) {
   const container = document.getElementById('line-filters');
   if (!container) return;
+  const visible = state.lines.filter((line) => state.activeLineIds.has(line.id)).length;
   const summary = document.getElementById('lines-summary');
   if (summary) {
-    const visible = state.lines.filter((line) => state.activeLineIds.has(line.id)).length;
     summary.textContent = state.lines.length ? `${visible} of ${state.lines.length} shown` : 'Loading lines';
+  }
+  const buttonSummary = document.getElementById('lines-button-summary');
+  if (buttonSummary) {
+    buttonSummary.textContent = state.lines.length ? `${visible}/${state.lines.length}` : '';
+    buttonSummary.parentElement.classList.toggle('map-tool-button--filtered', visible < state.lines.length);
   }
 
   const html = state.lines
@@ -256,6 +261,8 @@ function renderLineFilters(state) {
     })
     .join('');
 
+  const focusedLineId = container.contains(document.activeElement)
+    ? document.activeElement.dataset.lineId : null;
   // Avoid tearing down/rebuilding (and re-attaching listeners) on every poll
   // tick when the line list itself hasn't changed.
   if (container.dataset.rendered === html) return;
@@ -263,6 +270,7 @@ function renderLineFilters(state) {
   container.innerHTML = html;
   container.querySelectorAll('input[type="checkbox"]').forEach((input) => {
     input.addEventListener('change', () => toggleLine(Number(input.dataset.lineId)));
+    if (input.dataset.lineId === focusedLineId) input.focus({ preventScroll: true });
   });
 }
 
@@ -343,24 +351,26 @@ function wireSearch() {
     input.value = '';
     closeResults();
     clearSelectedStop();
-    input.focus();
+    const stopFinder = document.getElementById('map-stops-panel');
+    if (stopFinder?.hidden) document.getElementById('map-stops-toggle').focus({ preventScroll: true });
+    else input.focus();
   });
 }
 
 function renderArrivals(state) {
   const container = document.getElementById('arrivals');
-  if (!container) return;
+  const content = document.getElementById('arrivals-content');
+  const stopName = document.getElementById('arrivals-stop-name');
+  if (!container || !content || !stopName) return;
 
   container.hidden = !state.selectedStop;
+  stopName.textContent = stripStopId(state.selectedStop?.text) ?? '';
   if (!state.selectedStop) {
-    container.innerHTML = '';
+    content.innerHTML = '';
     return;
   }
 
-  const parts = [
-    '<p class="section-kicker">Departures from</p>',
-    `<h2>${escapeHtml(stripStopId(state.selectedStop.text))}</h2>`,
-  ];
+  const parts = [];
 
   if (state.isStopCancelled) {
     parts.push('<p class="banner banner-cancelled">All departures at this stop are cancelled.</p>');
@@ -385,7 +395,13 @@ function renderArrivals(state) {
     parts.push(`<p class="banner ${kind}">${escapeHtml(message.text)}</p>`);
   }
 
-  const visibleCalls = state.calls.filter((call) => state.activeLineIds.has(call.lineId));
+  const visibleCalls = state.calls
+    .filter((call) => state.activeLineIds.has(call.lineId))
+    .sort((a, b) => {
+      const aTime = plannedCallTime(a);
+      const bTime = plannedCallTime(b);
+      return aTime === bTime ? 0 : aTime - bTime;
+    });
 
   if (state.isCallsLoading && !visibleCalls.length) {
     parts.push('<p class="hint" role="status">Checking departures…</p>');
@@ -423,7 +439,12 @@ function renderArrivals(state) {
     parts.push('</ul>');
   }
 
-  container.innerHTML = parts.join('');
+  content.innerHTML = parts.join('');
+}
+
+function plannedCallTime(call) {
+  const time = Date.parse((call.departure ?? call.arrival)?.plannedTime);
+  return Number.isFinite(time) ? time : Infinity;
 }
 
 function delayLabel(plannedTime, forecastTime) {

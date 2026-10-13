@@ -65,9 +65,13 @@ test('late ETAs have an inline minute difference on bus, trip and departure card
     querySelector: () => null,
   };
   const arrivals = { innerHTML: '', hidden: false };
+  const arrivalsPanel = { hidden: false };
+  const stopName = { textContent: '' };
   globalThis.document = {
     activeElement: null,
-    getElementById: (id) => id === 'live-buses' ? container : id === 'arrivals' ? arrivals : null,
+    getElementById: (id) => ({
+      'live-buses': container, arrivals: arrivalsPanel, 'arrivals-content': arrivals, 'arrivals-stop-name': stopName,
+    })[id] ?? null,
   };
   try {
     const plannedTime = '2026-09-25T23:58:00+02:00';

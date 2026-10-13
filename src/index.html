@@ -35,40 +35,66 @@
   <main class="app-layout">
     <section class="map-panel" aria-label="Live bus map">
       <div id="map"></div>
+      <div id="map-controls" class="map-controls">
+        <div class="map-toolbar" role="group" aria-label="Map tools">
+          <button id="map-lines-toggle" class="map-tool-button" type="button" aria-expanded="false" aria-controls="map-lines-panel">
+            Lines <span id="lines-button-summary" class="map-tool-count"></span>
+          </button>
+          <button id="map-stops-toggle" class="map-tool-button" type="button" aria-expanded="false" aria-controls="map-stops-panel">
+            Find a stop
+          </button>
+        </div>
+        <section id="map-lines-panel" class="map-tool-panel" aria-labelledby="lines-heading" hidden>
+          <div class="map-tool-heading">
+            <h2 id="lines-heading">Lines</h2>
+            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close line filters">&times;</button>
+          </div>
+          <p id="lines-summary" class="hint">Loading lines</p>
+          <div id="line-filters" class="line-filters"></div>
+        </section>
+        <section id="map-stops-panel" class="map-tool-panel" aria-labelledby="stop-heading" hidden>
+          <div class="map-tool-heading">
+            <h2 id="stop-heading">Find a stop</h2>
+            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close stop finder">&times;</button>
+          </div>
+          <label class="visually-hidden" for="stop-search">Search for a bus stop</label>
+          <div class="stop-search-wrap">
+            <div class="stop-search">
+              <input id="stop-search" type="text" placeholder="Stop name or number" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="stop-search-results" aria-expanded="false" />
+            </div>
+            <ul id="stop-search-results" class="stop-search-results" role="listbox"></ul>
+          </div>
+          <button id="nearby-stops-button" type="button" class="nearby-stops-button" aria-label="Find stops near me">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
+            Near me
+          </button>
+          <p id="nearby-stops-status" class="hint" role="status" aria-live="polite" hidden></p>
+          <ul id="nearby-stops-list" class="nearby-stops-list"></ul>
+          <div id="saved-stops" class="commuter-favorites">
+            <h3 class="commuter-subheading">Saved stops</h3>
+            <ul id="favorite-stops-list" class="favorite-stops-list"></ul>
+            <p id="favorite-stops-empty" class="hint">Save a selected stop from its departures panel for quick access next time.</p>
+            <p id="favorites-status" class="hint" role="status" aria-live="polite" hidden></p>
+          </div>
+        </section>
+      </div>
       <span class="map-instruction">Tap a stop to see departures</span>
     </section>
 
     <aside class="side-panel">
-      <section class="stop-panel" aria-labelledby="stop-heading">
-        <h2 id="stop-heading">Find a stop</h2>
-        <label class="visually-hidden" for="stop-search">Search for a bus stop</label>
-        <div class="stop-search-wrap">
-          <div class="stop-search">
-            <input id="stop-search" type="text" placeholder="Stop name or number" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="stop-search-results" aria-expanded="false" />
-            <button id="stop-clear" type="button">Clear</button>
+      <section id="arrivals" class="arrivals-panel" aria-label="Stop departures" hidden>
+        <div class="departure-heading">
+          <div>
+            <p class="section-kicker">Departures from</p>
+            <h2 id="arrivals-stop-name"></h2>
           </div>
-          <ul id="stop-search-results" class="stop-search-results" role="listbox"></ul>
+          <button id="stop-clear" class="stop-clear" type="button">Clear</button>
         </div>
-        <div class="stop-actions">
-          <button id="nearby-stops-button" type="button" class="nearby-stops-button">Find stops near me</button>
+        <div id="arrivals-content"></div>
+        <div class="departure-actions">
           <button id="favorite-toggle" type="button" class="favorite-toggle" aria-pressed="false" hidden>Save this stop</button>
         </div>
-        <p id="nearby-stops-status" class="hint" role="status" aria-live="polite" hidden></p>
-        <ul id="nearby-stops-list" class="nearby-stops-list"></ul>
-        <div id="saved-stops" class="commuter-favorites">
-          <h3 class="commuter-subheading">Saved stops</h3>
-          <ul id="favorite-stops-list" class="favorite-stops-list"></ul>
-          <p id="favorite-stops-empty" class="hint">Save this stop for quick access next time.</p>
-          <p id="favorites-status" class="hint" role="status" aria-live="polite" hidden></p>
-        </div>
       </section>
-
-      <section id="arrivals" class="arrivals-panel" aria-label="Stop departures" hidden></section>
-
-      <details class="filters-panel">
-        <summary id="lines-heading">Lines <span id="lines-summary" class="filters-summary">All lines</span></summary>
-        <div id="line-filters" class="line-filters"></div>
-      </details>
 
       <section id="live-buses" class="live-buses-panel" aria-label="Live buses"></section>
     </aside>

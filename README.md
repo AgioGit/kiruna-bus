@@ -26,7 +26,9 @@ database.
   planned time when it differs, last update, and position freshness. Buses
   whose next stop is more than 10 minutes away are hidden. Late expected
   times show a red `(+N min)` immediately after the time, including trip
-  stops and stop departures.
+  stops and stop departures. Stop departures are ordered by planned time,
+  earliest first, regardless of live ETA changes; missing planned times
+  appear last.
 - Select a bus card to pan to and highlight that bus; its tooltip closes after
   three seconds while the highlight remains. Click a bus marker to select it
   too, or select it again to clear it. The selected card previews its next
@@ -41,8 +43,15 @@ database.
   through autocomplete or a map click.
 - Save favorite stops locally for one-tap arrivals, or ask for nearby stops
   using browser location permission.
-- Client-side line filters (under the Lines disclosure) apply to routes,
-  vehicle markers, and departure and bus cards.
+- In this map-first layout experiment, Lines and Find a stop are expandable
+  buttons on the map. Only one panel opens at a time; close it with its
+  button, the close control, Escape, or a click outside. The Lines button
+  shows the active line count; filters apply to routes, vehicle markers,
+  and departure and bus cards. Find a stop contains text search, saved stops
+  and a Near me button. Location is requested only by pressing Near me;
+  results persist when closed and the same button can retry. Selecting a
+  stop closes the finder and displays its departures, with Clear and
+  Save this stop controls in that departures panel.
 - Automatic refresh every 60 seconds, with a "(update in: N s)" countdown in
   the header; polling pauses in a hidden browser tab and resumes immediately
   when the tab becomes visible. Existing bus markers move in place rather
@@ -51,11 +60,12 @@ database.
   including when their calls disappear from a scan. Positions older than
   three minutes are hidden from both the map and list, even when selected;
   they also expire between browser polls.
-- On phones and tablet portrait, stop search comes before the map and
-  departures; tablet landscape and desktop use a map/sidebar layout. Bus
+- On phones and tablet portrait, a larger map comes first, followed by
+  departures and live buses; tablet landscape and
+  desktop use a full-height map with a compact sidebar. Bus
   and departure cards fit narrow screens without horizontal scrolling.
   The desktop sidebar stays within the viewport and the live-bus panel
-  scrolls when expanding lines or trip details.
+  scrolls when expanding trip details.
 - Touch-sized controls plus keyboard navigation for stop suggestions and live
   bus selection.
 - Light and dark themes: follows the system setting by default, with a header

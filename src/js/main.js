@@ -7,6 +7,7 @@ import { initClockOffset } from './clock.js';
 import { initCommuter } from './commuter.js';
 import { initCountdown } from './countdown.js';
 import { initTheme } from './theme.js';
+import { initMapControls } from './mapControls.js';
 
 initTheme();
 
@@ -23,6 +24,7 @@ async function main() {
 
   initMap('map');
   initUi();
+  initMapControls();
   initCommuter();
   // initPoller polls the server's /api/buses (live-vehicles.js), which
   // populates routes/markers/the live buses list without any user

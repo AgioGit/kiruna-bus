@@ -159,13 +159,15 @@ body {
 
 .map-panel {
   position: relative;
-  order: 1;
-  min-height: 280px;
-  height: clamp(280px, 42vh, 460px);
-  height: clamp(280px, 42dvh, 460px);
+  isolation: isolate;
+  min-height: 320px;
+  height: clamp(320px, 62vh, 640px);
+  height: clamp(320px, 62dvh, 640px);
 }
 
 #map {
+  position: relative;
+  z-index: 0;
   width: 100%;
   height: 100%;
   border-radius: 10px;
@@ -175,8 +177,9 @@ body {
 .map-instruction {
   position: absolute;
   z-index: 500;
-  top: 1rem;
-  right: 1rem;
+  bottom: 1.75rem;
+  left: 0.75rem;
+  max-width: calc(100% - 1.5rem);
   padding: 0.35rem 0.6rem;
   border-radius: 6px;
   background: var(--color-overlay);
@@ -186,17 +189,144 @@ body {
   pointer-events: none;
 }
 
-.side-panel {
-  display: contents;
+.map-controls {
+  position: absolute;
+  z-index: 1000;
+  inset: 0.75rem 0.75rem 3.5rem 4rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  pointer-events: none;
 }
 
-.stop-panel { order: 0; }
-.arrivals-panel { order: 2; }
-.filters-panel { order: 3; }
-.live-buses-panel { order: 4; }
+.map-toolbar {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.5rem;
+  max-width: 100%;
+}
 
-.filters-panel,
-.stop-panel,
+.map-tool-button,
+.map-tool-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.map-tool-button {
+  box-shadow: 0 2px 8px rgba(18, 35, 60, 0.18);
+  white-space: nowrap;
+}
+
+.map-tool-button[aria-expanded="true"],
+.map-tool-button--filtered {
+  border-color: var(--color-accent);
+  background: var(--color-selected);
+  color: var(--color-accent-ink);
+}
+
+.map-tool-count {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-tool-count:empty {
+  display: none;
+}
+
+.map-tool-panel {
+  width: 20rem;
+  max-width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  box-shadow: 0 6px 24px rgba(18, 35, 60, 0.22);
+  pointer-events: auto;
+}
+
+.map-tool-panel[hidden] {
+  display: none;
+}
+
+.map-tool-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.map-tool-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.map-tool-close {
+  min-width: 44px;
+  padding: 0;
+  border: 0;
+  background: var(--color-button);
+  font-size: 1.3rem;
+}
+
+.map-tool-panel .line-filters {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.map-tool-panel .nearby-stops-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.map-tool-panel .stop-search-wrap {
+  margin-top: 0.5rem;
+}
+
+.map-tool-panel .stop-search-results {
+  position: static;
+  margin-top: 0.35rem;
+  max-height: 12rem;
+  box-shadow: none;
+}
+
+.map-tool-panel .nearby-stops-list {
+  flex-direction: column;
+}
+
+.nearby-stop-select {
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.side-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
 .arrivals-panel,
 .live-buses-panel {
   min-width: 0;
@@ -207,7 +337,6 @@ body {
   box-shadow: 0 2px 10px rgba(18, 35, 60, 0.04);
 }
 
-.stop-panel h2,
 .arrivals-panel h2,
 .live-buses-panel h2 {
   margin: 0 0 0.7rem;
@@ -222,24 +351,6 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-}
-
-.filters-panel summary {
-  cursor: pointer;
-  font-weight: 650;
-}
-
-.filters-summary {
-  float: right;
-  color: var(--color-muted);
-  font-size: 0.82rem;
-  font-weight: 400;
-}
-
-.filters-panel[open] .line-filters {
-  margin-top: 0.75rem;
-  padding-top: 0.55rem;
-  border-top: 1px solid var(--color-border);
 }
 
 .line-filters {
@@ -261,6 +372,7 @@ body {
 .line-filter input {
   width: 1.25rem;
   height: 1.25rem;
+  flex-shrink: 0;
 }
 
 .stop-search {
@@ -284,7 +396,7 @@ body {
   font: inherit;
 }
 
-.stop-search button {
+.stop-clear {
   min-width: 44px;
   min-height: 44px;
   padding: 0.55rem 0.75rem;
@@ -341,11 +453,31 @@ summary:focus-visible,
   background: var(--color-hover);
 }
 
-.stop-actions {
+.departure-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.7rem;
+}
+
+.departure-actions:has(.favorite-toggle[hidden]) {
+  display: none;
+}
+
+.departure-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.departure-heading > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.stop-clear {
+  flex-shrink: 0;
 }
 
 .commuter-subheading {
@@ -405,6 +537,9 @@ summary:focus-visible,
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.favorite-stop-select {
   white-space: nowrap;
 }
 
@@ -763,13 +898,10 @@ button.vehicle-card {
   .app-layout {
     display: grid;
     min-height: 0;
-    grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
-    gap: 1rem;
-    padding: 1rem;
+    grid-template-columns: minmax(0, 1fr) clamp(340px, 28vw, 400px);
   }
 
   .map-panel {
-    order: 0;
     height: auto;
     min-height: 0;
   }
@@ -808,15 +940,12 @@ button.vehicle-card {
     padding-top: 0.6rem;
   }
 
-  .filters-panel,
-  .stop-panel,
   .arrivals-panel,
   .live-buses-panel {
     padding: 0.65rem;
   }
 
-  .map-panel {
-    height: clamp(280px, 39vh, 400px);
-    height: clamp(280px, 39dvh, 400px);
+  .side-panel {
+    gap: 0.6rem;
   }
 }

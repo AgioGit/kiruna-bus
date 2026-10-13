@@ -56,3 +56,50 @@ test('live buses stay grouped by line color and journey as ETAs change', () => {
     globalThis.document = originalDocument;
   }
 });
+
+test('stop departures sort by planned instants, not live ETAs, without mutating calls', () => {
+  const originalDocument = globalThis.document;
+  const arrivals = { innerHTML: '', hidden: false };
+  const arrivalsPanel = { hidden: false };
+  const stopName = { textContent: '' };
+  globalThis.document = {
+    activeElement: null,
+    getElementById: (id) => ({
+      arrivals: arrivalsPanel, 'arrivals-content': arrivals, 'arrivals-stop-name': stopName,
+    })[id] ?? null,
+  };
+  const call = (destination, plannedTime, forecastTime, lineId = 1) => ({
+    id: destination, destination, lineId, line: '1',
+    departure: { plannedTime, forecastTime },
+  });
+  const calls = [
+    call('Missing', null, '2026-10-13T21:00:00Z'),
+    call('Equal', '2026-10-13T22:05:00Z', '2026-10-14T00:20:00+02:00'),
+    call('Later', '2026-10-14T00:05:00+02:00', '2026-10-14T00:01:00+02:00'),
+    call('Earlier', '2026-10-13T23:55:00+02:00', '2026-10-14T00:15:00+02:00'),
+    call('Invalid', 'invalid', '2026-10-13T21:00:00Z'),
+    {
+      id: 'arrival-only', destination: 'Arrival only', lineId: 1, line: '1',
+      arrival: { plannedTime: '2026-10-13T21:50:00Z', forecastTime: '2026-10-13T21:51:00Z' },
+    },
+    call('Filtered out', '2026-10-13T20:00:00Z', '2026-10-13T20:00:00Z', 2),
+  ];
+  const sourceOrder = calls.map((item) => item.id);
+  const displayedDestinations = () =>
+    [...arrivals.innerHTML.matchAll(/class="departure-destination">([^<]+)</g)].map((match) => match[1]);
+  try {
+    store.set({ selectedStop: { id: 1, text: 'Center (1)' }, calls, activeLineIds: new Set([1]) });
+    initUi();
+    const expected = ['Arrival only', 'Earlier', 'Equal', 'Later', 'Missing', 'Invalid'];
+    assert.deepEqual(displayedDestinations(), expected);
+    assert.deepEqual(calls.map((item) => item.id), sourceOrder);
+
+    store.set({ calls: calls.map((item) => item.departure
+      ? { ...item, departure: { ...item.departure, forecastTime: '2026-10-14T01:00:00Z' } }
+      : item) });
+    assert.deepEqual(displayedDestinations(), expected);
+    assert.deepEqual(calls.map((item) => item.id), sourceOrder);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});

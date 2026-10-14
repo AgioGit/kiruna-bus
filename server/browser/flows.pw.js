@@ -205,7 +205,7 @@ for (const width of [1280, 375, 320]) {
       const message = document.getElementById('status-banner').getBoundingClientRect();
       return {
         afterCountdown: message.x >= countdown.right,
-        sameLine: Math.abs(message.y - countdown.y) < 2,
+        sameLine: message.top >= countdown.top && message.bottom <= countdown.bottom,
         overflows: element.scrollWidth > element.clientWidth,
       };
     });

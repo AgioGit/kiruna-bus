@@ -42,8 +42,9 @@ it as stale. Position collections become stale after three minutes without a
 refresh, scans after the two-interval retention window, and expired GPS fixes
 are reported at read time even while background work is pending. Expired fixes
 are counted in quality metadata rather than reported as a position-fetch error.
-The browser explains that those outdated position reports are hidden; GPS expiry
-alone does not produce a generic "Live data: stale" banner.
+The browser suppresses routine expired-report counts and notices for GPS expiry
+alone; other freshness and refresh failures remain visible inline after the
+update countdown.
 
 The browser normally polls every 60 seconds, pauses in hidden tabs, and resumes
 immediately. Failures retry with jittered exponential backoff, capped at five

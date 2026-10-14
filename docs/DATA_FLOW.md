@@ -101,9 +101,9 @@ collection age becomes stale after three minutes, and scan age after the
 two-interval retention window. GPS expiry is evaluated at response time, even
 while a refresh is still running, so genuinely expired fixes are still hidden
 and reported immediately. Expiry remains in quality metadata, not the
-position-fetch error. The browser explains how many outdated position reports
-were hidden instead of showing a generic stale warning for GPS expiry alone.
-Other freshness and refresh failures still show their warnings.
+position-fetch error. The browser does not show a notice for GPS expiry alone
+or counts of hidden expired reports. Other freshness and refresh failures still
+show their warnings.
 
 ## Browser state and polling
 
@@ -138,6 +138,9 @@ Transient search, nearby-location, and optional browser-storage notices begin
 fading after ten seconds. New notices replace old timers; unrelated refreshes
 do not extend them. Active live-data, departure, route, and startup failures
 remain visible until recovery or until their context is cleared.
+Header notices sit inline after the refresh countdown in a fixed-height row,
+with touch/keyboard horizontal scrolling for overflow, so showing and hiding
+messages does not shift the map or other header controls.
 
 Search/resolve/nearby endpoints use the server's local stop catalog. Nearby
 coordinates are not forwarded to Boreal or included in request logs. Browser

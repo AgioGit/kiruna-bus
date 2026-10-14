@@ -161,6 +161,127 @@ test('transient search failures fade after ten seconds without hiding an ongoing
   expect(await page.evaluate(async () => (await import('/js/appState.js')).store.get().errors.stopNotFound)).toBeNull();
 });
 
+for (const width of [1280, 375, 320]) {
+  test(`inline update notices do not shift the layout at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.clock.install();
+    await page.goto('/');
+    await expect(page.locator('#live-buses')).toContainText('does not mean no buses');
+    await page.evaluate(async () => {
+      (await import('/js/poller.js')).pausePolling();
+      const { store } = await import('/js/appState.js');
+      store.set({
+        catalogInfo: null,
+        liveQuality: { state: 'fresh', reasons: [] },
+        errors: Object.fromEntries(Object.keys(store.get().errors).map((key) => [key, null])),
+      });
+    });
+    const geometry = () => page.evaluate(() => {
+      const bounds = (selector) => {
+        const { x, y, width, height } = document.querySelector(selector).getBoundingClientRect();
+        return { x, y, width, height };
+      };
+      return {
+        header: bounds('.app-header'), map: bounds('#map'),
+        countdown: bounds('#refresh-countdown'), theme: bounds('#theme-toggle'),
+        pageWidth: document.documentElement.scrollWidth,
+      };
+    });
+    const before = await geometry();
+    expect(before.pageWidth).toBe(width);
+    await expect(page.locator('.header-notices')).toBeHidden();
+
+    const longMessage = 'Bus positions could not be refreshed. Please try again shortly. '.repeat(8);
+    await page.evaluate(async (message) => {
+      const { store } = await import('/js/appState.js');
+      store.set({ errors: { ...store.get().errors, vehicles: message } });
+    }, longMessage);
+    const notices = page.locator('.header-notices');
+    await expect(notices).toBeVisible();
+    await expect(page.locator('#status-banner')).toContainText(longMessage.trim());
+    expect(await geometry()).toEqual(before);
+    const inline = await notices.evaluate((element) => {
+      const countdown = document.getElementById('refresh-countdown').getBoundingClientRect();
+      const message = document.getElementById('status-banner').getBoundingClientRect();
+      return {
+        afterCountdown: message.x >= countdown.right,
+        sameLine: Math.abs(message.y - countdown.y) < 2,
+        overflows: element.scrollWidth > element.clientWidth,
+      };
+    });
+    expect(inline).toEqual({ afterCountdown: true, sameLine: true, overflows: true });
+    await notices.focus();
+    await page.keyboard.press('ArrowRight');
+    await page.clock.runFor(300);
+    await expect.poll(() => notices.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+
+    await page.evaluate(async () => {
+      const { store } = await import('/js/appState.js');
+      store.set({ errors: { ...store.get().errors, vehicles: null, stopNotFound: 'Temporary search failure' } });
+    });
+    await page.clock.runFor(10300);
+    await expect(page.locator('#status-banner')).toBeHidden();
+    expect(await geometry()).toEqual(before);
+
+    await page.evaluate(async () => {
+      const { store } = await import('/js/appState.js');
+      store.set({ liveQuality: { state: 'stale', reasons: ['GPS_OLD'], positions: { expired: 2 } } });
+    });
+    await expect(page.locator('#status-banner')).toBeHidden();
+    expect(await geometry()).toEqual(before);
+    await page.evaluate(async () => {
+      const { store } = await import('/js/appState.js');
+      store.set({ liveQuality: { ...store.get().liveQuality, reasons: ['GPS_OLD', 'PARTIAL_SCAN'], scan: { failed: 2 } } });
+    });
+    await expect(page.locator('#status-banner')).toHaveText('Live data: stale (2 stops failed to refresh).');
+    expect(await geometry()).toEqual(before);
+  });
+}
+
+test('map-library failures share the inline notice area with live status', async ({ page }) => {
+  await page.route('**/leaflet.js', (route) => route.abort());
+  await page.goto('/');
+  const fatal = page.locator('.header-updates #app-error');
+  await expect(fatal).toBeVisible();
+  await expect(fatal).toContainText('The map library could not be loaded');
+  await expect(page.locator('.header-updates #status-banner')).toContainText('Cached basic map information');
+});
+
+test('stale bus cards fade like their markers and recover when positions refresh', async ({ page, request }) => {
+  await request.post('/__test/mode/live');
+  await page.goto('/');
+  const card = page.locator('#live-buses button[data-journey-id="101"]');
+  await expect(card).toBeVisible();
+  await expect(card).toHaveCSS('opacity', '1');
+  await page.evaluate(async () => {
+    (await import('/js/poller.js')).pausePolling();
+    const { store } = await import('/js/appState.js');
+    store.set({ liveVehicles: store.get().liveVehicles.map((bus) => ({
+      ...bus, stale: true, ageMs: 120000,
+      position: { ...bus.position, timestamp: new Date(Date.now() - 120000).toISOString() },
+    })) });
+  });
+  const staleMarker = page.locator('.vehicle-arrow--stale, .vehicle-dot--stale');
+  await expect(staleMarker).toHaveCount(1);
+  await expect(staleMarker).toHaveCSS('opacity', '0.45');
+  await expect(card).toHaveCSS('opacity', '0.45');
+  await expect(card).toContainText('Position 2 min old');
+  await card.click();
+  await expect(card).toHaveAttribute('aria-expanded', 'true');
+  await expect(card).toHaveCSS('opacity', '0.45');
+  await page.evaluate(async () => {
+    const { store } = await import('/js/appState.js');
+    store.set({ liveVehicles: store.get().liveVehicles.map((bus) => ({
+      ...bus, stale: false, ageMs: 0,
+      position: { ...bus.position, timestamp: new Date().toISOString() },
+    })) });
+  });
+  await expect(staleMarker).toHaveCount(0);
+  await expect(card).toHaveCSS('opacity', '1');
+  await expect(card).toContainText('Live position');
+  await expect(card).toHaveAttribute('aria-expanded', 'true');
+});
+
 test('hovered and selected bus previews end at the third upcoming stop', async ({ page, request }) => {
   await request.post('/__test/mode/live');
   await page.goto('/');

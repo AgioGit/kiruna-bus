@@ -24,6 +24,7 @@ at the server boundary. There is no application build step or database.
 - Live bus cards are grouped by line color in a stable order rather than
   reshuffling by ETA. They show line, destination, next stop, expected time,
   planned time when it differs, last update, and position freshness. Buses
+  with older positions fade to match their map markers. Buses
   whose next stop is more than 10 minutes away are hidden. Late expected
   times show a red `(+N min)` immediately after the time, including trip
   stops and stop departures. Stop departures are ordered by planned time,
@@ -56,8 +57,10 @@ at the server boundary. There is no application build step or database.
 - Automatic refresh every 60 seconds, with a "(update in: N s)" countdown in
   the header; polling pauses in a hidden browser tab and resumes immediately
   when the tab becomes visible. Existing bus markers move in place rather
-  than being recreated. Transient notices fade after 10 seconds; ongoing
-  failures remain visible.
+  than being recreated. Notices appear inline after the countdown without
+  shifting the layout; long messages can be scrolled horizontally by touch
+  or keyboard. Transient notices fade after 10 seconds; ongoing failures
+  remain visible. Routine counts of expired GPS reports are not shown.
 - Missing buses retain their last known position and original Updated time,
   including when their calls disappear from a scan. Positions older than
   three minutes are hidden from both the map and list, even when selected;

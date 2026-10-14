@@ -482,15 +482,11 @@ function renderStatus(state) {
   }
   if (state.liveQuality && state.liveQuality.state !== 'fresh') {
     const quality = state.liveQuality;
-    const expired = quality.positions?.expired ?? 0;
-    const onlyExpired = expired > 0 && quality.reasons?.length > 0 &&
+    const onlyExpired = quality.state === 'stale' && quality.reasons?.length > 0 &&
       quality.reasons.every((reason) => reason === 'GPS_OLD');
-    const status = onlyExpired ? '' :
-      `${quality.state}${quality.scan?.failed ? ` (${quality.scan.failed} stops failed to refresh)` : ''}.`;
-    const hidden = expired > 0
-      ? `${expired} outdated position ${expired === 1 ? 'report is' : 'reports are'} hidden (older than 3 minutes).`
-      : '';
-    messages.push(['quality', ['Live data:', status, hidden].filter(Boolean).join(' ')]);
+    if (!onlyExpired) {
+      messages.push(['quality', `Live data: ${quality.state}${quality.scan?.failed ? ` (${quality.scan.failed} stops failed to refresh)` : ''}.`]);
+    }
   }
   let elements = statusElements.get(container);
   if (!elements) {

@@ -96,9 +96,9 @@ body {
 }
 
 .header-title {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 0.25rem 0.85rem;
 }
 
@@ -108,17 +108,59 @@ body {
   letter-spacing: -0.02em;
 }
 
-.header-title p {
+.header-title > p {
   margin: 0;
   color: #c7d7ea;
   font-size: 0.85rem;
 }
 
-.refresh-countdown {
+.header-updates {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 1.5em;
   font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.refresh-countdown {
+  flex: 0 0 8.5rem;
+  height: 1.5em;
   color: #9fb0c9;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.header-notices {
+  flex: 1;
+  min-width: 0;
+  height: 1.5em;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.header-notices::-webkit-scrollbar {
+  display: none;
+}
+
+.header-notices:not(:has(> :not([hidden]))) {
+  visibility: hidden;
+}
+
+.header-notices:focus-visible {
+  outline: 1px solid #ffdada;
+  outline-offset: 2px;
+}
+
+.header-notice {
+  color: #ffdada;
+}
+
+.header-notice::before {
+  content: ' | ';
+  white-space: pre;
 }
 
 .banner {
@@ -126,12 +168,6 @@ body {
   padding: 0.4rem 0.6rem;
   border-radius: 4px;
   font-size: 0.9rem;
-}
-
-.banner-error,
-.banner-status {
-  background: #402020;
-  color: #ffdada;
 }
 
 .banner-cancelled,
@@ -811,7 +847,9 @@ button.vehicle-card {
   transform-origin: 50% 60%;
 }
 
-.vehicle-arrow--stale {
+.vehicle-card--stale,
+.vehicle-arrow--stale,
+.vehicle-dot--stale {
   opacity: 0.45;
 }
 
@@ -821,10 +859,6 @@ button.vehicle-card {
   border: 3px solid #ffffff;
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.6);
-}
-
-.vehicle-dot--stale {
-  opacity: 0.45;
 }
 
 .vehicle-next-stop-path {
@@ -944,6 +978,27 @@ button.vehicle-card {
     min-height: 12rem;
     overflow-y: auto;
     overscroll-behavior: contain;
+  }
+}
+
+@media (max-width: 700px) {
+  .header-title {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .header-title > p {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .header-updates {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .theme-toggle {
+    grid-column: 2;
+    grid-row: 1 / 3;
   }
 }
 

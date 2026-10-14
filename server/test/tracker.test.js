@@ -223,6 +223,56 @@ test('an out-of-order position response does not replace a newer known fix', asy
   assert.deepEqual(older.vehicles[0].position, first.vehicles[0].position);
 });
 
+test('expired reports stay in quality metadata without becoming a position-fetch error', async () => {
+  const fake = fakeApi();
+  const getCalls = fake.api.getCalls;
+  const getVehiclePosition = fake.api.getVehiclePosition;
+  const expiredPosition = { location: { lat: 67.9, lon: 20.3 }, timestamp: iso(-181) };
+  fake.api.getCalls = async (stop) => {
+    const response = await getCalls(stop);
+    const current = response.calls[0].calls[0];
+    response.calls[0].calls.push({ ...current, id: `expired-${current.id}`, journeyId: 2 });
+    return response;
+  };
+  fake.api.getVehiclePosition = (id) => id.startsWith('expired-')
+    ? Promise.resolve(expiredPosition) : getVehiclePosition(id);
+  const tracker = trackerWith(fake);
+  try {
+    const mixed = await tracker.getBuses();
+    assert.equal(mixed.vehicles.length, 1);
+    assert.equal(mixed.quality.positions.expired, 1);
+    assert.equal(mixed.quality.state, 'stale');
+    assert.deepEqual(mixed.quality.reasons, ['GPS_OLD']);
+    assert.equal(mixed.error, null);
+
+    fake.state.failPositions = true;
+    fake.state.now += 20000;
+    const failed = await tracker.getBuses();
+    assert.match(failed.error, /Some bus positions could not be refreshed/);
+    assert.ok(failed.quality.reasons.includes('POSITION_FAILURE'));
+    assert.ok(failed.quality.reasons.includes('GPS_OLD'));
+    assert.equal(failed.vehicles[0].stale, true);
+
+    fake.state.failPositions = false;
+    fake.api.getVehiclePosition = async () => expiredPosition;
+    fake.state.now += 200000;
+    const expired = await tracker.getBuses();
+    assert.deepEqual(expired.vehicles, []);
+    assert.equal(expired.quality.positions.expired, 2);
+    assert.equal(expired.quality.state, 'stale');
+    assert.deepEqual(expired.quality.reasons, ['GPS_OLD']);
+    assert.equal(expired.error, null);
+
+    fake.api.getVehiclePosition = getVehiclePosition;
+    fake.state.now += 20000;
+    const recovered = await tracker.getBuses();
+    assert.equal(recovered.vehicles.length, 1);
+    assert.equal(recovered.quality.positions.expired, 0);
+    assert.equal(recovered.quality.state, 'fresh');
+    assert.equal(recovered.error, null);
+  } finally { tracker.close(); }
+});
+
 test('a bus missing from a successful departure scan keeps its last known fix until it expires', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);

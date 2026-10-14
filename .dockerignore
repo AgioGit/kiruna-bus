@@ -3,3 +3,8 @@
 .worktrees
 docs
 **/node_modules
+server/test
+server/browser
+server/test-results
+server/playwright-report
+server/playwright.config.js

@@ -50,6 +50,9 @@ export const store = createStore({
   // each bus's `upcomingStops` in /api/buses (see live-vehicles.js).
 
   clockOffsetMs: 0, // serverTime - clientTime, from GetSystemTimestamp
+  catalogInfo: null,
+  liveQuality: null,
+  departuresUpdatedAt: null,
 
   errors: {
     config: null,
@@ -58,5 +61,7 @@ export const store = createStore({
     routes: null,
     calls: null,
     stopNotFound: null,
+    cache: null,
+    stops: null,
   },
 });

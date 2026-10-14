@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { correctLkabBoundRoute } from '../src/js/routeCorrections.js';
+import { correctLkabBoundRoute } from '../server/lib/routeCorrections.js';
 
 const start = { lat: 67.84712, lon: 20.35045 };
 const adolf = { lat: 67.86001, lon: 20.22105 };

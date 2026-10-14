@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://boreal-bus.local/schemas",
+  "definitions": {
+    "coordinate": {
+      "type": "object", "required": ["lat", "lon"],
+      "properties": { "lat": { "type": "number", "minimum": -90, "maximum": 90 }, "lon": { "type": "number", "minimum": -180, "maximum": 180 } }
+    },
+    "nearbyRequest": {
+      "type": "object", "additionalProperties": false, "required": ["coordinate"],
+      "properties": {
+        "coordinate": { "$ref": "#/definitions/coordinate" },
+        "maxCount": { "type": ["integer", "null"], "minimum": 1, "maximum": 20, "default": 5 },
+        "maxDistance": { "type": ["number", "null"], "minimum": 0, "maximum": 50000, "default": 1000 }
+      }
+    },
+    "line": {
+      "type": "object", "required": ["id", "text"],
+      "properties": { "id": { "type": "integer", "minimum": 1 }, "text": { "type": "string", "minLength": 1 } }
+    },
+    "lines": { "type": "array", "items": { "$ref": "#/definitions/line" }, "minItems": 1 },
+    "stop": {
+      "type": "object", "required": ["id", "text"],
+      "properties": { "id": { "type": "integer", "minimum": 1 }, "text": { "type": "string", "minLength": 1 }, "location": { "anyOf": [{ "$ref": "#/definitions/coordinate" }, { "type": "null" }] } }
+    },
+    "stops": { "type": "array", "items": { "$ref": "#/definitions/stop" } },
+    "locatedStop": {
+      "allOf": [{ "$ref": "#/definitions/stop" }, { "required": ["location"], "properties": { "location": { "$ref": "#/definitions/coordinate" } } }]
+    },
+    "forecast": {
+      "type": ["object", "null"],
+      "required": ["plannedTime", "forecastTime"],
+      "properties": {
+        "plannedTime": { "type": ["string", "null"], "format": "date-time" },
+        "forecastTime": { "type": ["string", "null"], "format": "date-time" },
+        "quality": { "type": ["string", "null"] }
+      }
+    },
+    "call": {
+      "type": "object", "required": ["id", "lineId", "journeyId", "sequenceNumber", "line", "destination"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "lineId": { "type": "integer", "minimum": 1 },
+        "routeId": { "type": ["integer", "null"], "minimum": 1 },
+        "journeyId": { "type": "integer" },
+        "sequenceNumber": { "type": "integer" },
+        "line": { "type": "string" }, "destination": { "type": "string" },
+        "arrival": { "$ref": "#/definitions/forecast" }, "departure": { "$ref": "#/definitions/forecast" }
+      },
+      "anyOf": [{ "required": ["arrival"], "properties": { "arrival": { "type": "object" } } }, { "required": ["departure"], "properties": { "departure": { "type": "object" } } }]
+    },
+    "calls": {
+      "type": "object", "required": ["calls"],
+      "properties": {
+        "calls": { "type": "array", "items": { "type": "object", "required": ["calls"], "properties": { "calls": { "type": "array", "items": { "$ref": "#/definitions/call" } } } } },
+        "isStopCancelled": { "type": "boolean" },
+        "messages": { "type": "array", "items": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "affectedCalls": { "type": "array", "items": { "type": "string" } }, "isDisturbance": { "type": "boolean" } } } }
+      }
+    },
+    "position": {
+      "type": ["object", "null"], "required": ["location", "timestamp"],
+      "properties": {
+        "location": { "$ref": "#/definitions/coordinate" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "heading": { "type": ["number", "null"], "minimum": 0, "maximum": 360 }
+      }
+    },
+    "route": {
+      "type": "object", "required": ["locations"],
+      "properties": { "locations": { "type": "array", "minItems": 2, "items": { "$ref": "#/definitions/coordinate" } } }
+    },
+    "timestamp": {
+      "type": "object", "required": ["systemTimestamp", "clientTimestamp"],
+      "properties": { "systemTimestamp": { "type": "string", "format": "date-time" }, "clientTimestamp": { "type": "string", "format": "date-time" } }
+    },
+    "mapConfig": {
+      "type": "object", "required": ["minZoom", "tiles"], "additionalProperties": false,
+      "properties": {
+        "minZoom": { "type": "number", "minimum": 0, "maximum": 22 },
+        "tiles": { "type": "object", "required": ["urlTemplate"], "additionalProperties": false, "properties": { "urlTemplate": { "type": "string", "pattern": "^https://" } } }
+      }
+    },
+    "upstreamConfig": {
+      "type": "object", "required": ["minZoom", "tiles"],
+      "properties": {
+        "minZoom": { "$ref": "#/definitions/mapConfig/properties/minZoom" },
+        "tiles": {
+          "type": "object", "required": ["urlTemplate"],
+          "properties": { "urlTemplate": { "$ref": "#/definitions/mapConfig/properties/tiles/properties/urlTemplate" } }
+        }
+      }
+    },
+    "lineRoutes": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "integer", "minimum": 1 } } },
+    "catalog": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "version", "capturedAt", "provenance", "config", "lines", "stops", "lineRoutes", "routes"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "version": { "type": "string", "minLength": 1 },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "provenance": { "type": "string", "minLength": 1 },
+        "config": { "$ref": "#/definitions/mapConfig" },
+        "lines": { "$ref": "#/definitions/lines" },
+        "stops": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/locatedStop" } },
+        "lineRoutes": { "$ref": "#/definitions/lineRoutes" },
+        "routes": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/definitions/route" } }
+      }
+    },
+    "bootstrap": {
+      "type": "object", "required": ["catalog", "source", "serverTime"],
+      "properties": { "catalog": { "$ref": "#/definitions/catalog" }, "source": { "enum": ["bundled", "upstream"] }, "serverTime": { "type": "string", "format": "date-time" } }
+    },
+    "coverage": {
+      "type": "object", "required": ["attempted", "succeeded", "failed"],
+      "properties": {
+        "attempted": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "expired": { "type": "integer", "minimum": 0, "description": "Retained GPS fixes older than three minutes at response time." }
+      }
+    },
+    "quality": {
+      "type": "object", "required": ["state", "reasons", "scan", "positions", "lastScanAt", "positionsAt", "clockSynchronized"],
+      "properties": {
+        "state": { "enum": ["fresh", "partial", "stale", "unavailable"] },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "scan": { "$ref": "#/definitions/coverage" }, "positions": { "$ref": "#/definitions/coverage" },
+        "lastScanAt": { "type": ["string", "null"], "format": "date-time" },
+        "positionsAt": { "type": ["string", "null"], "format": "date-time" },
+        "clockSynchronized": { "type": "boolean" }
+      }
+    },
+    "upcomingStop": {
+      "type": "object", "required": ["stopText", "plannedTime", "forecastTime"],
+      "properties": {
+        "stopText": { "type": ["string", "null"] }, "sequenceNumber": { "type": "integer" },
+        "plannedTime": { "type": ["string", "null"], "format": "date-time" },
+        "forecastTime": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "vehicle": {
+      "type": "object",
+      "required": ["key", "position", "journeyId", "lineId", "line", "destination", "ageMs", "nextStop", "followingStop", "upcomingStops", "stale"],
+      "properties": {
+        "key": { "type": "string" },
+        "position": { "allOf": [{ "$ref": "#/definitions/position" }, { "type": "object" }] },
+        "journeyId": { "type": "integer" }, "lineId": { "type": "integer", "minimum": 1 },
+        "routeId": { "type": ["integer", "null"] }, "line": { "type": "string" }, "destination": { "type": "string" },
+        "ageMs": { "type": "number" }, "stale": { "type": "boolean" },
+        "nextStop": { "$ref": "#/definitions/upcomingStop" },
+        "followingStop": { "anyOf": [{ "$ref": "#/definitions/upcomingStop" }, { "type": "null" }] },
+        "upcomingStops": { "type": "array", "items": { "$ref": "#/definitions/upcomingStop" } }
+      }
+    },
+    "buses": {
+      "type": "object", "required": ["generatedAt", "serverTime", "vehicles", "lineRoutes", "quality"],
+      "properties": {
+        "generatedAt": { "type": "string", "format": "date-time" }, "serverTime": { "type": "string", "format": "date-time" },
+        "lineRoutes": { "$ref": "#/definitions/lineRoutes" }, "quality": { "$ref": "#/definitions/quality" },
+        "vehicles": { "type": "array", "items": { "$ref": "#/definitions/vehicle" } }
+      }
+    },
+    "departures": {
+      "type": "object", "required": ["calls", "messages", "isStopCancelled", "updatedAt", "state"],
+      "properties": {
+        "calls": { "type": "array", "items": { "$ref": "#/definitions/call" } },
+        "messages": { "type": "array", "items": { "type": "object" } }, "isStopCancelled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }, "state": { "enum": ["fresh", "stale"] }
+      }
+    },
+    "error": {
+      "type": "object", "required": ["error"], "additionalProperties": false,
+      "properties": { "error": { "type": "object", "required": ["code", "message", "requestId"], "additionalProperties": false, "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "requestId": { "type": "string" } } } }
+    }
+  }
+}

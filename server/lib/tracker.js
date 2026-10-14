@@ -1,4 +1,7 @@
-import { runPooled } from './pool.js';
+import { runPooled, withSignal } from './pool.js';
+import { unavailable as liveUnavailable } from './errors.js';
+import { randomUUID } from 'node:crypto';
+import { setMaxListeners } from 'node:events';
 
 export const UPCOMING_STOP_COUNT = 2;
 
@@ -234,22 +237,25 @@ export function buildVehicles({ journeys, positions, nowMs, unavailableCallIds =
 async function withRetry(fn, delayMs) {
   try {
     return await fn();
-  } catch {
+  } catch (error) {
+    if (error.code || error.name === 'AbortError' || error.name === 'TimeoutError') throw error;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     return fn();
   }
 }
 
-export function createTracker({ api, now = Date.now, options = {} }) {
+export function createTracker({ api, now = Date.now, options = {}, initialStops = [], stopSource, telemetry }) {
   const opt = { ...DEFAULT_OPTIONS, ...options };
+  const maxScanAgeMs = opt.scanIntervalMs * 2;
 
   let clockOffsetMs = 0;
   let clockAt = Number.NEGATIVE_INFINITY;
 
-  let stops = null;
-  let stopsAt = Number.NEGATIVE_INFINITY;
+  let stops = initialStops.length ? initialStops : null;
+  let stopsAt = initialStops.length ? now() : Number.NEGATIVE_INFINITY;
   let stopsInFlight = null;
   const stopLocations = new Map(); // stopAreaId -> { text, location }
+  for (const stop of initialStops) stopLocations.set(stop.id, { text: stop.text, location: stop.location });
 
   let journeys = new Map();
   const lineRoutes = new Map(); // lineId -> Set<routeId>, only ever grows
@@ -266,17 +272,30 @@ export function createTracker({ api, now = Date.now, options = {} }) {
   const lastKnownJourneys = new Map();
 
   let refreshing = null;
+  let completed = false;
+  let clockSynchronized = false;
+  let coverage = { attempted: 0, succeeded: 0, failed: 0 };
+  let positionCoverage = { attempted: 0, succeeded: 0, failed: 0, missing: 0 };
+  let lastSuccessfulScan = null;
+  let lastSuccessfulPositions = null;
+  const callsByStop = new Map();
+  const shutdown = new AbortController();
+  let operationSignal;
+  const apiOptions = () => ({ signal: operationSignal, priority: 'background' });
 
   const serverNow = () => now() + clockOffsetMs;
 
   async function ensureClock() {
     if (now() - clockAt < opt.clockTtlMs) return;
     try {
-      const resp = await api.getSystemTimestamp(new Date(now()).toISOString());
+      const resp = await withSignal(api.getSystemTimestamp(new Date(now()).toISOString(), apiOptions()), operationSignal);
       const offset = Date.parse(resp.systemTimestamp) - Date.parse(resp.clientTimestamp);
       if (Number.isFinite(offset)) clockOffsetMs = offset;
+      clockSynchronized = Number.isFinite(offset);
       clockAt = now();
-    } catch {
+    } catch (error) {
+      clockSynchronized = false;
+      telemetry?.log('clock_sync_failed', { code: error.code ?? error.name });
       clockAt = now() - opt.clockTtlMs + opt.retryAfterFailureMs;
     }
   }
@@ -284,8 +303,8 @@ export function createTracker({ api, now = Date.now, options = {} }) {
   // Every stop served by any line, deduped by id, plus each stop's
   // coordinates (GetStopAreas omits them; FindStopArea has them).
   async function loadStops() {
-    const lines = (await api.getLines()) ?? [];
-    const results = await runPooled(lines, opt.scanConcurrency, (line) => api.getStopAreas(line.id));
+    const lines = (await withSignal(api.getLines(apiOptions()), operationSignal)) ?? [];
+    const results = await runPooled(lines, opt.scanConcurrency, (line) => api.getStopAreas(line.id, apiOptions()), { signal: operationSignal });
     const byId = new Map((stops ?? []).map((stop) => [stop.id, stop]));
     let incomplete = false;
     for (const res of results) {
@@ -299,7 +318,8 @@ export function createTracker({ api, now = Date.now, options = {} }) {
 
     const found = [...byId.values()];
     const missing = found.filter((stop) => !stopLocations.has(stop.id));
-    const located = await runPooled(missing, opt.scanConcurrency, (stop) => api.findStopArea(stop.text));
+    const located = await runPooled(missing, opt.scanConcurrency, (stop) => api.findStopArea(stop.text, apiOptions()), { signal: operationSignal });
+    operationSignal?.throwIfAborted();
     located.forEach((res, i) => {
       const location = res.status === 'fulfilled' ? res.value?.location : null;
       if (location?.lat == null || location?.lon == null) {
@@ -315,6 +335,13 @@ export function createTracker({ api, now = Date.now, options = {} }) {
   }
 
   function ensureStops() {
+    const provided = stopSource?.();
+    if (provided) {
+      stops = provided;
+      stopLocations.clear();
+      for (const stop of stops) stopLocations.set(stop.id, { text: stop.text, location: stop.location });
+      return Promise.resolve(stops);
+    }
     if (stops && now() - stopsAt < opt.stopsTtlMs) return Promise.resolve(stops);
     if (!stopsInFlight) {
       stopsInFlight = loadStops()
@@ -340,17 +367,29 @@ export function createTracker({ api, now = Date.now, options = {} }) {
 
   async function scan() {
     const stopList = await ensureStops();
-    const callsWithStop = [];
-    let succeeded = 0;
-    await runPooled(stopList, opt.scanConcurrency, async (stop) => {
-      const resp = await withRetry(() => api.getCalls(stop.text), opt.retryDelayMs);
-      for (const group of resp?.calls ?? []) {
-        for (const call of group.calls ?? []) callsWithStop.push({ call, stopText: stop.text });
-      }
-      succeeded += 1;
-    });
+    const results = await runPooled(stopList, opt.scanConcurrency, async (stop) => {
+      const resp = await withRetry(() => api.getCalls(stop.text, apiOptions()), opt.retryDelayMs);
+      operationSignal?.throwIfAborted();
+      return { calls: (resp?.calls ?? []).flatMap((group) => group.calls ?? []), at: resp.fetchedAt ?? now() };
+    }, { signal: operationSignal });
+    operationSignal?.throwIfAborted();
+    const succeeded = results.filter((res) => res.status === 'fulfilled').length;
+    coverage = { attempted: stopList.length, succeeded, failed: stopList.length - succeeded };
     if (succeeded === 0) throw new Error('Unable to refresh live bus data.');
+    results.forEach((res, i) => {
+      if (res.status === 'fulfilled') callsByStop.set(stopList[i].id, { ...res.value, text: stopList[i].text });
+    });
+    const callsWithStop = [];
+    const knownStops = new Set(stopList.map((stop) => stop.id));
+    for (const [id, entry] of callsByStop) {
+      if (!knownStops.has(id) || now() - entry.at > maxScanAgeMs) {
+        callsByStop.delete(id);
+        continue;
+      }
+      for (const call of entry.calls) callsWithStop.push({ call, stopText: entry.text });
+    }
 
+    lineRoutes.clear();
     for (const { call } of callsWithStop) {
       if (!call.routeId) continue;
       const routes = lineRoutes.get(call.lineId) ?? new Set();
@@ -359,13 +398,24 @@ export function createTracker({ api, now = Date.now, options = {} }) {
     }
     journeys = buildJourneys(callsWithStop);
     lastScanAt = now();
+    if (!coverage.failed) lastSuccessfulScan = new Date(Math.min(...results.map((res) => res.value.at))).toISOString();
+    scanError = coverage.failed ? 'Some stops could not be refreshed.' : null;
     rescanRequested = false;
     positionsDirty = true;
   }
 
   async function fetchPositions() {
     const callIds = [...new Set([...journeys.values()].flatMap((info) => info.positionCallIds))];
-    const results = await runPooled(callIds, opt.positionConcurrency, (callId) => api.getVehiclePosition(callId));
+    const results = await runPooled(callIds, opt.positionConcurrency, (callId) => api.getVehiclePosition(callId, apiOptions()), { signal: operationSignal });
+    operationSignal?.throwIfAborted();
+    positionCoverage = {
+      attempted: callIds.length,
+      succeeded: results.filter((res) => res.status === 'fulfilled' && res.value?.location).length,
+      failed: results.filter((res) => res.status === 'rejected').length,
+      missing: results.filter((res) => res.status === 'fulfilled' && !res.value?.location).length,
+      expired: results.filter((res) => res.status === 'fulfilled' && res.value?.location
+        && serverNow() - Date.parse(res.value.timestamp) > STALE_THRESHOLD_MS).length,
+    };
 
     // Keep the actual GPS timestamp, not the time of this fetch. The journey
     // cache also covers calls disappearing or changing ids during a scan.
@@ -397,7 +447,10 @@ export function createTracker({ api, now = Date.now, options = {} }) {
     const gotFix = results.some((res) => res.status === 'fulfilled' && res.value?.location &&
       Number.isFinite(Date.parse(res.value.timestamp)));
     if (unavailable.size) rescanRequested = true;
-    positionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.' : null;
+    positionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.'
+      : positionCoverage.failed ? 'Some bus positions could not be refreshed.'
+        : positionCoverage.expired ? 'Some bus position fixes are older than three minutes.' : null;
+    if (!positionCoverage.failed) lastSuccessfulPositions = new Date(now()).toISOString();
   }
 
   async function doRefresh() {
@@ -405,18 +458,30 @@ export function createTracker({ api, now = Date.now, options = {} }) {
     if (scanDue()) {
       try {
         await scan();
-        scanError = null;
       } catch (err) {
         scanError = err.message;
         scanBackoffUntil = now() + opt.retryAfterFailureMs;
       }
     }
     if (positionsDue()) await fetchPositions();
+    completed = true;
   }
 
   function refreshIfNeeded() {
     if (!refreshing && (scanDue() || positionsDue())) {
-      refreshing = doRefresh().finally(() => {
+      const refreshId = randomUUID();
+      operationSignal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(options.refreshTimeoutMs ?? 60000)]);
+      setMaxListeners(Math.max(opt.scanConcurrency, opt.positionConcurrency) * 3 + 4, operationSignal);
+      const started = performance.now();
+      refreshing = doRefresh().catch((error) => {
+        scanError = 'Unable to refresh live bus data.';
+        scanBackoffUntil = now() + opt.retryAfterFailureMs;
+        positionsAt = now();
+        positionsDirty = false;
+        telemetry?.log('refresh_failed', { refreshId, code: error.code ?? error.name });
+      }).finally(() => {
+        telemetry?.duration('refresh', performance.now() - started);
+        telemetry?.log('refresh_completed', { refreshId, durationMs: Math.round(performance.now() - started), scan: coverage, positions: positionCoverage, error: scanError ?? positionsError });
         refreshing = null;
       });
     }
@@ -426,17 +491,18 @@ export function createTracker({ api, now = Date.now, options = {} }) {
   return {
     // Latest snapshot of every live bus, refreshing first if data is stale.
     // Throws only when there is no data at all and Boreal can't be reached.
-    async getBuses() {
+    async getBuses({ wait = true } = {}) {
       // With data in hand, a slow Boreal must not stall the response: wait a
       // bit, then serve what we have while the refresh finishes in the background.
       const refresh = refreshIfNeeded();
-      if (journeys.size || lastKnownJourneys.size) {
+      if (wait && (journeys.size || lastKnownJourneys.size)) {
         let timer;
         await Promise.race([refresh, new Promise((resolve) => (timer = setTimeout(resolve, opt.maxWaitMs)))]);
         clearTimeout(timer);
-      } else {
+      } else if (wait) {
         await refresh;
       }
+      if (!wait && !completed) throw liveUnavailable(scanError ? 'LIVE_UNAVAILABLE' : 'WARMING_UP');
       const error = scanError ?? positionsError;
       const nowMs = serverNow();
       const displayJourneys = new Map(journeys);
@@ -462,12 +528,16 @@ export function createTracker({ api, now = Date.now, options = {} }) {
           unavailable.add(id);
         }
       }
-      if (!displayJourneys.size && error) throw new Error(error);
+      if (!displayJourneys.size && error) {
+        if (!wait) throw liveUnavailable('LIVE_UNAVAILABLE');
+        throw new Error(error);
+      }
 
       return {
         generatedAt: new Date(now()).toISOString(),
         serverTime: new Date(nowMs).toISOString(),
         error,
+        quality: this.quality(),
         vehicles: buildVehicles({
           journeys: displayJourneys, positions: displayPositions, nowMs, unavailableCallIds: unavailable,
         }),
@@ -480,6 +550,28 @@ export function createTracker({ api, now = Date.now, options = {} }) {
       return [...stopLocations].map(([id, { text, location }]) => ({ id, text, location }));
     },
 
+    getSnapshot() { return this.getBuses({ wait: false }); },
+    serverTime: () => new Date(serverNow()).toISOString(),
+    refresh: () => refreshIfNeeded(),
+    close: () => shutdown.abort(new DOMException('Server shutting down', 'AbortError')),
+    quality() {
+      const reasons = [];
+      const expired = [...positions.values()].filter((position) =>
+        serverNow() - Date.parse(position.timestamp) > STALE_THRESHOLD_MS).length;
+      if (scanError) reasons.push(coverage.succeeded ? 'PARTIAL_SCAN' : 'SCAN_FAILED');
+      if (positionsError) reasons.push(positionCoverage.failed ? 'POSITION_FAILURE' : 'NO_POSITION_FIX');
+      if (expired) reasons.push('GPS_OLD');
+      if (!clockSynchronized) reasons.push('CLOCK_UNSYNCHRONIZED');
+      // Refresh TTLs schedule demand-driven work; they do not expire the snapshot.
+      if (Number.isFinite(lastScanAt) && now() - lastScanAt > maxScanAgeMs) reasons.push('SCAN_OLD');
+      if (Number.isFinite(positionsAt) && now() - positionsAt > STALE_THRESHOLD_MS) reasons.push('POSITIONS_OLD');
+      return {
+        state: !completed ? 'unavailable' : reasons.includes('SCAN_FAILED') || reasons.includes('SCAN_OLD') || reasons.includes('POSITIONS_OLD') || reasons.includes('GPS_OLD')
+          ? 'stale' : reasons.length ? 'partial' : 'fresh',
+        reasons, scan: { ...coverage }, positions: { ...positionCoverage, expired },
+        lastScanAt: lastSuccessfulScan, positionsAt: lastSuccessfulPositions, clockSynchronized,
+      };
+    },
     status() {
       return {
         journeys: journeys.size,
@@ -487,6 +579,8 @@ export function createTracker({ api, now = Date.now, options = {} }) {
         lastScanAt: Number.isFinite(lastScanAt) ? new Date(lastScanAt).toISOString() : null,
         positionsAt: Number.isFinite(positionsAt) ? new Date(positionsAt).toISOString() : null,
         error: scanError ?? positionsError,
+        quality: this.quality(),
+        refreshing: Boolean(refreshing),
       };
     },
   };

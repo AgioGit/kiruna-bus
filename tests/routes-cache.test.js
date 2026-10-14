@@ -37,34 +37,32 @@ test('concurrent route discoveries share one request and reuse cached geometry',
   }
 });
 
-test('LKAB-bound route fetches its return shape and caches the corrected approach', async () => {
+test('LKAB-bound route consumes the corrected shape supplied by the backend', async () => {
   const originalGetMapRoute = api.getMapRoute;
   const requested = [];
   api.getMapRoute = (id) => {
     requested.push(id);
-    return Promise.resolve(id === 540298 ? outbound : returning);
+    return Promise.resolve({ locations: [adolf, skradare, lkab] });
   };
 
   try {
     const call = { lineId: 110000548, routeId: 540298 };
     recordRouteIdsFromCalls([call]);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(requested.sort(), [535423, 540298]);
+    assert.deepEqual(requested, [540298]);
     assert.deepEqual(store.get().routeGeometry.get(540298).locations, [adolf, skradare, lkab]);
     assert.equal(store.get().errors.routes, null);
     recordRouteIdsFromCalls([call]);
-    assert.equal(requested.length, 2);
+    assert.equal(requested.length, 1);
   } finally {
     api.getMapRoute = originalGetMapRoute;
   }
 });
 
-test('missing return geometry reports an error and keeps the wrong outbound shape off the map', async () => {
+test('backend correction failure is surfaced and no incorrect shape is displayed', async () => {
   const originalGetMapRoute = api.getMapRoute;
   store.set({ routeGeometry: new Map(), errors: { ...store.get().errors, routes: null } });
-  api.getMapRoute = (id) => id === 540298
-    ? Promise.resolve(outbound)
-    : Promise.reject(new Error('Route unavailable'));
+  api.getMapRoute = () => Promise.reject(new Error('Cannot correct route: return-route geometry is unavailable'));
 
   try {
     recordRouteIdsFromCalls([{ lineId: 110000548, routeId: 540298 }]);
@@ -72,7 +70,7 @@ test('missing return geometry reports an error and keeps the wrong outbound shap
     assert.equal(store.get().routeGeometry.has(540298), false);
     assert.match(store.get().errors.routes, /return-route geometry is unavailable/);
 
-    api.getMapRoute = (id) => Promise.resolve(id === 540298 ? outbound : returning);
+    api.getMapRoute = () => Promise.resolve({ locations: [adolf, skradare, lkab] });
     recordRouteIdsFromCalls([{ lineId: 110000548, routeId: 540298 }]);
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(store.get().routeGeometry.get(540298).locations, [adolf, skradare, lkab]);

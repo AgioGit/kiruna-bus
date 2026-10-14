@@ -1,0 +1,5 @@
+**/node_modules/
+.azure/
+server/test-results/
+server/playwright-report/
+server/data/*.tmp

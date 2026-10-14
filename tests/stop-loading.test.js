@@ -11,8 +11,8 @@ test('switching stops clears previous departures and ignores the old response', 
   const pending = new Map();
   globalThis.setInterval = () => 1;
   globalThis.clearInterval = () => {};
-  api.getCalls = ({ fromStopAreaQuery }) =>
-    new Promise((resolve) => pending.set(fromStopAreaQuery, resolve));
+  api.getCalls = ({ stopId }) =>
+    new Promise((resolve) => pending.set(stopId, resolve));
 
   try {
     store.set({ calls: [{ id: 'previous', lineId: 1 }] });
@@ -21,12 +21,12 @@ test('switching stops clears previous departures and ignores the old response', 
     assert.equal(store.get().isCallsLoading, true);
 
     selectStopArea({ id: 2, text: 'Second (2)' });
-    pending.get('First (1)')({ calls: [{ calls: [{ id: 'old', lineId: 1 }] }] });
+    pending.get(1)({ calls: [{ id: 'old', lineId: 1 }] });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(store.get().calls, []);
     assert.equal(store.get().isCallsLoading, true);
 
-    pending.get('Second (2)')({ calls: [{ calls: [{ id: 'new', lineId: 1 }] }] });
+    pending.get(2)({ calls: [{ id: 'new', lineId: 1 }] });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(store.get().calls.map((call) => call.id), ['new']);
     assert.equal(store.get().isCallsLoading, false);

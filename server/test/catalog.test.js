@@ -1,0 +1,89 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { getEventListeners } from 'node:events';
+import { loadCatalog, captureCatalog, validateCatalog, createCatalog } from '../lib/catalog.js';
+import { generateSnapshot } from '../scripts/snapshot.js';
+
+const snapshot = loadCatalog(new URL('../data/bootstrap.json', import.meta.url));
+function fakeApi() {
+  return {
+    getConfig: async () => snapshot.config,
+    getLines: async () => snapshot.lines,
+    getStopAreas: async () => snapshot.stops,
+    findStopArea: async (text) => snapshot.stops.find((stop) => stop.text === text),
+    getCalls: async () => ({ calls: [] }),
+    getMapRoute: async (id) => snapshot.routes[id],
+  };
+}
+
+test('catalog regeneration retains known routes even outside service hours and strips live fields', async () => {
+  const catalog = await captureCatalog({ api: fakeApi(), previous: snapshot });
+  validateCatalog(catalog);
+  assert.deepEqual(catalog.lineRoutes, snapshot.lineRoutes);
+  assert.equal(catalog.schemaVersion, 1);
+  assert.ok(Number.isFinite(Date.parse(catalog.capturedAt)));
+  assert.deepEqual(Object.keys(catalog.routes[Object.keys(catalog.routes)[0]]), ['locations']);
+  assert.equal('vehicles' in catalog, false);
+});
+
+test('snapshot generation fails atomically on partial upstream or decreased coverage', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'boreal-catalog-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'bootstrap.json');
+  const original = JSON.stringify(snapshot);
+  await writeFile(target, original);
+  const api = fakeApi();
+  api.getCalls = async () => { throw new Error('partial scan'); };
+  await assert.rejects(generateSnapshot({ target, api }), /partial scan/);
+  assert.equal(await readFile(target, 'utf8'), original);
+  const fewer = fakeApi();
+  fewer.getStopAreas = async () => snapshot.stops.slice(1);
+  await assert.rejects(generateSnapshot({ target, api: fewer }), /coverage decreased/);
+  assert.equal(await readFile(target, 'utf8'), original);
+});
+
+test('route correction is performed on the server and a failed correction is not cached', async () => {
+  let available = false;
+  const adolf = { lat: 67.86001, lon: 20.22105 }, lkab = { lat: 67.84944, lon: 20.19584 }, street = { lat: 67.86239, lon: 20.21577 };
+  const api = fakeApi();
+  api.getMapRoute = async (id) => {
+    if (id === 540298) return { locations: [adolf, { lat: 67.855, lon: 20.208 }, lkab] };
+    if (!available) throw new Error('Return shape unavailable');
+    return { locations: [lkab, street, adolf] };
+  };
+  const isolated = {
+    ...snapshot, lines: [snapshot.lines[0]],
+    lineRoutes: { [snapshot.lines[0].id]: [1] },
+    routes: { 1: { locations: [adolf, lkab] } },
+  };
+  const catalog = createCatalog({ snapshot: isolated, api });
+  await assert.rejects(catalog.route(540298), /Return shape unavailable/);
+  available = true;
+  assert.deepEqual((await catalog.route(540298)).locations, [adolf, street, lkab]);
+  catalog.close();
+});
+
+test('catalog line discovery stays within eight workers and releases cancellation listeners', async () => {
+  const lines = Array.from({ length: 24 }, (_, index) => ({ id: 1000 + index, text: `Line ${index}` }));
+  const route = Number(Object.keys(snapshot.routes)[0]);
+  const previous = { ...snapshot, lines, lineRoutes: Object.fromEntries(lines.map((line) => [line.id, [route]])) };
+  const controller = new AbortController();
+  const api = fakeApi();
+  let active = 0;
+  let peak = 0;
+  api.getLines = async () => lines;
+  api.getStopAreas = async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active--;
+    return snapshot.stops;
+  };
+  const catalog = await captureCatalog({ api, previous, signal: controller.signal });
+  assert.equal(catalog.lines.length, 24);
+  assert.equal(peak, 8);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});

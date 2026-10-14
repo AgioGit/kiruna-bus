@@ -1,34 +1,49 @@
-name: Build and push image
+name: Check and publish container
 
 on:
+  pull_request:
+    paths: ['server/**', 'src/**', 'tests/**', 'application.openapi.json', '.dockerignore', '.github/workflows/image.yml']
   push:
     branches: [main]
-    paths:
-      - server/**
-      - src/**
-      - .dockerignore
-      - .github/workflows/image.yml
+    paths: ['server/**', 'src/**', 'tests/**', 'application.openapi.json', '.dockerignore', '.github/workflows/image.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  image:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: docker/login-action@v3
+      - uses: actions/setup-node@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci --no-fund --no-audit
+        working-directory: server
+      - run: node --test
+      - run: npx playwright install --with-deps chromium
+        working-directory: server
+      - run: npm run test:browser
+        working-directory: server
 
+  image:
+    needs: checks
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -36,11 +51,32 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha
-
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: server/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: |
+            boreal-bus:verify
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Smoke-test the exact image with upstream unavailable
+        shell: bash
+        run: |
+          ID=$(docker run --rm -d -p 127.0.0.1::8080 -e BOREAL_BASE=http://127.0.0.1:9 boreal-bus:verify)
+          trap 'docker rm -f "$ID" >/dev/null' EXIT
+          PORT=$(docker port "$ID" 8080/tcp | awk -F: '{print $NF}')
+          node server/scripts/smoke.js "http://127.0.0.1:$PORT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          while IFS= read -r tag; do
+            [ -z "$tag" ] || docker push "$tag"
+          done <<< "$TAGS"

@@ -8,9 +8,11 @@ const DEBOUNCE_MS = 300;
 let debounceTimer = null;
 let autocompleteAbort = null;
 let requestSeq = 0;
+let selectionRequest = 0;
 
 // Debounced, stale-response-guarded autocomplete search.
 export function searchStops(query, onResults) {
+  if (store.get().errors.stopNotFound) store.set({ errors: { ...store.get().errors, stopNotFound: null } });
   clearTimeout(debounceTimer);
   requestSeq += 1;
   autocompleteAbort?.abort();
@@ -26,9 +28,11 @@ export function searchStops(query, onResults) {
     try {
       const results = await api.autocomplete(query.trim(), { signal: autocompleteAbort.signal });
       if (mySeq !== requestSeq) return; // a newer keystroke already superseded this
+      store.set({ errors: { ...store.get().errors, stopNotFound: null } });
       onResults(results ?? []);
     } catch (err) {
-      if (err.name === 'AbortError') return;
+      if (err.name === 'AbortError' || mySeq !== requestSeq) return;
+      store.set({ errors: { ...store.get().errors, stopNotFound: `Stop search failed: ${err.message}` } });
       onResults([]);
     }
   }, DEBOUNCE_MS);
@@ -47,13 +51,17 @@ export function cancelStopSearch() {
 }
 
 export async function selectStopByText(stopText) {
+  const request = ++selectionRequest;
+  const selectionSeq = store.get().stopSelectionSeq;
+  if (store.get().errors.stopNotFound) store.set({ errors: { ...store.get().errors, stopNotFound: null } });
   let stop;
   try {
     stop = await api.findStopArea(stopText);
   } catch (err) {
-    store.set({ errors: { ...store.get().errors, stopNotFound: err.message } });
+    if (request === selectionRequest && selectionSeq === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: err.message } });
     return null;
   }
+  if (request !== selectionRequest || store.get().stopSelectionSeq !== selectionSeq) return null;
   if (!stop) {
     store.set({ errors: { ...store.get().errors, stopNotFound: `Stop "${stopText}" was not found.` } });
     return null;
@@ -67,6 +75,7 @@ export async function selectStopsNearLocation(coordinate) {
 }
 
 export function selectStopArea(stop) {
+  selectionRequest++;
   store.set((state) => ({
     selectedStop: stop,
     stopSelectionSeq: state.stopSelectionSeq + 1,
@@ -80,6 +89,10 @@ export function selectStopArea(stop) {
 }
 
 export function clearSelectedStop() {
-  store.set((state) => ({ selectedStop: null, stopSelectionSeq: state.stopSelectionSeq + 1 }));
+  selectionRequest++;
+  store.set((state) => ({
+    selectedStop: null, stopSelectionSeq: state.stopSelectionSeq + 1,
+    errors: { ...state.errors, calls: null, stopNotFound: null },
+  }));
   onStopDeselected();
 }

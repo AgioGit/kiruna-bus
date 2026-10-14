@@ -5,8 +5,11 @@ import { formatTime, minutesUntil } from './clock.js';
 import { colorForLineId, lineColorOrderForId, textColorForLineId } from './lineColors.js';
 import { selectVehicle } from './vehicleSelection.js';
 import { MAX_POSITION_AGE_MS } from './live-vehicles.js';
+import { showNotice } from './notices.js';
 
 const TRIP_PREVIEW_STOPS = 3;
+const TRANSIENT_ERRORS = new Set(['stopNotFound', 'cache']);
+const statusElements = new WeakMap();
 
 export function initUi() {
   wireSearch();
@@ -16,7 +19,8 @@ export function initUi() {
     renderStopSearchInput(state);
     if (state.liveVehicles !== prev.liveVehicles || state.activeLineIds !== prev.activeLineIds ||
         state.selectedVehicleJourneyId !== prev.selectedVehicleJourneyId ||
-        state.journeyStops !== prev.journeyStops || state.lines !== prev.lines) {
+        state.journeyStops !== prev.journeyStops || state.lines !== prev.lines ||
+        state.liveQuality !== prev.liveQuality || state.errors.vehicles !== prev.errors.vehicles) {
       renderVehicleCards(state);
     }
     if (state.calls !== prev.calls || state.selectedStop !== prev.selectedStop ||
@@ -25,7 +29,7 @@ export function initUi() {
         state.activeLineIds !== prev.activeLineIds || state.clockOffsetMs !== prev.clockOffsetMs) {
       renderArrivals(state);
     }
-    if (state.errors !== prev.errors) renderStatus(state);
+    if (state.errors !== prev.errors || state.catalogInfo !== prev.catalogInfo || state.liveQuality !== prev.liveQuality) renderStatus(state);
   });
   renderLineFilters(store.get());
   renderStopSearchInput(store.get());
@@ -116,7 +120,11 @@ function renderVehicleCards(state) {
   });
 
   if (!visibleVehicles.length) {
-    container.innerHTML = '<h2>Live buses</h2><p class="hint">No buses are reporting right now. You can still check departures at a stop.</p>';
+    const unknown = state.errors.vehicles || state.liveQuality?.state === 'unavailable' || !state.liveQuality;
+    const message = unknown ? 'Live tracking is warming up or unavailable. This does not mean no buses are running. You can still explore stops and routes.'
+      : state.liveQuality.state !== 'fresh' ? 'No fresh positions are available. Live tracking is degraded; buses may still be running.'
+      : 'No buses are reporting right now. You can still check departures at a stop.';
+    container.innerHTML = `<h2>Live buses</h2><p class="hint">${message}</p>`;
     if (focusedJourney) {
       container.tabIndex = -1;
       container.focus({ preventScroll: true });
@@ -465,11 +473,45 @@ function lateEta(plannedTime, forecastTime) {
 function renderStatus(state) {
   const container = document.getElementById('status-banner');
   if (!container) return;
-  const messages = Object.entries(state.errors)
-    .filter(([, value]) => value)
-    .map(([key, value]) => `${key}: ${value}`);
+  const messages = [];
+  if (state.catalogInfo && state.catalogInfo.source !== 'upstream') {
+    messages.push(['catalog', `Cached basic map information from ${new Date(state.catalogInfo.capturedAt).toLocaleString('sv-SE')}. Live data loads separately.`]);
+  }
+  for (const [key, value] of Object.entries(state.errors)) {
+    if (value) messages.push([key, `${key}: ${value}`]);
+  }
+  if (state.liveQuality && state.liveQuality.state !== 'fresh') {
+    messages.push(['quality', `Live data: ${state.liveQuality.state}${state.liveQuality.scan?.failed ? ` (${state.liveQuality.scan.failed} stops failed to refresh)` : ''}.`]);
+  }
+  let elements = statusElements.get(container);
+  if (!elements) {
+    elements = new Map();
+    statusElements.set(container, elements);
+  }
+  const keys = new Set(messages.map(([key]) => key));
+  for (const [key, element] of elements) {
+    if (keys.has(key)) continue;
+    showNotice(element, '');
+    element.remove();
+    elements.delete(key);
+  }
+  for (const [key, message] of messages) {
+    let element = elements.get(key);
+    if (!element) {
+      element = document.createElement('span');
+      element.className = 'status-message';
+      elements.set(key, element);
+    }
+    container.appendChild(element);
+    const error = state.errors[key];
+    showNotice(element, message, {
+      transient: TRANSIENT_ERRORS.has(key),
+      onDismiss: () => {
+        if (store.get().errors[key] === error) store.set({ errors: { ...store.get().errors, [key]: null } });
+      },
+    });
+  }
   container.hidden = messages.length === 0;
-  container.textContent = messages.join(' | ');
 }
 
 function escapeHtml(value) {

@@ -2,122 +2,119 @@ import { store } from './appState.js';
 import { fetchCallsForSelectedStop } from './calls.js';
 import { refreshLiveVehicles } from './live-vehicles.js';
 import { refreshStopLocations } from './stop-locations.js';
+import { refreshBootstrap } from './config.js';
 
-const LIVE_VEHICLES_INTERVAL_MS = 60000; // one /api/buses request per tick
-const CALLS_INTERVAL_MS = 60000; // selected-stop GetCalls poll
+const INTERVAL_MS = 60000;
+let liveTimer, callsTimer, liveAbort, callsAbort;
+let liveGeneration = 0, callsGeneration = 0;
+let liveFailures = 0, callsFailures = 0;
+let paused = false, initialized = false;
+let nextAt = null, running = false;
 
-let liveVehiclesTimer = null;
-let callsTimer = null;
-let callsAbort = null;
-let liveVehiclesAbort = null;
-let liveVehiclesRunning = false;
-let nextLiveVehiclesAt = null;
+export function getLiveVehiclesSchedule() { return { nextAt, running }; }
 
-// Read by countdown.js; deliberately not in the store so the once-a-second
-// countdown doesn't re-render the map and tables.
-export function getLiveVehiclesSchedule() {
-  return { nextAt: liveVehiclesTimer ? nextLiveVehiclesAt : null, running: liveVehiclesRunning };
+export function failureDelay(failures, retryAfter, random = Math.random) {
+  return Math.min(300000, Math.max(retryAfter ?? 0, Math.min(300000, 5000 * 2 ** Math.min(failures - 1, 6)) * (1 + random() * 0.2)));
 }
 
-// Generation token: bumped on stop select/deselect and pause/resume so
-// in-flight responses tied to a stale state never get applied.
-let generation = 0;
-let paused = false;
-
-// The server does the scanning and caching, so a tick is a single request.
-// A tick is skipped rather than stacked if the previous one is still running
-// (the very first request can be slow while the server warms up).
-async function pollLiveVehicles() {
-  nextLiveVehiclesAt = Date.now() + LIVE_VEHICLES_INTERVAL_MS;
-  if (liveVehiclesRunning) return;
-  liveVehiclesRunning = true;
-  const myGeneration = generation;
-  liveVehiclesAbort?.abort();
-  liveVehiclesAbort = new AbortController();
-  const { signal } = liveVehiclesAbort;
+async function pollLiveVehicles(token) {
+  if (paused || token !== liveGeneration) return;
+  const controller = new AbortController();
+  liveAbort = controller;
+  const signal = controller.signal;
+  const isCurrent = () => !signal.aborted && !paused && token === liveGeneration;
+  running = true;
+  nextAt = null;
+  let wait = INTERVAL_MS;
+  void refreshStopLocations({ signal, isCurrent }).catch((error) => {
+    if (isCurrent()) store.set({ errors: { ...store.get().errors, stops: error.message } });
+  });
+  void refreshBootstrap({ signal, isCurrent }).catch((error) => {
+    if (isCurrent()) store.set({ errors: { ...store.get().errors, config: error.message } });
+  });
   try {
-    await refreshLiveVehicles({ signal });
-    if (myGeneration !== generation) return; // stale
-    await refreshStopLocations({ signal }).catch(() => {}); // retried next tick
-  } catch (err) {
-    if (err.name !== 'AbortError' && myGeneration === generation) {
-      store.set({ errors: { ...store.get().errors, vehicles: 'Unable to refresh live bus data.' } });
+    await refreshLiveVehicles({ signal, isCurrent });
+    if (isCurrent()) liveFailures = 0;
+  } catch (error) {
+    if (isCurrent()) {
+      wait = failureDelay(++liveFailures, error.retryAfter);
+      store.set({
+        liveQuality: { ...(store.get().liveQuality ?? {}), state: 'unavailable' },
+        errors: { ...store.get().errors, vehicles: error.message },
+      });
     }
   } finally {
-    liveVehiclesRunning = false;
+    if (liveAbort === controller) running = false;
+    if (isCurrent()) {
+      nextAt = Date.now() + wait;
+      liveTimer = setTimeout(() => pollLiveVehicles(token), wait);
+      liveTimer?.unref?.();
+    }
   }
 }
 
-async function pollCalls() {
-  const { selectedStop } = store.get();
-  if (!selectedStop) return;
-  const myGeneration = generation;
-  callsAbort?.abort();
-  callsAbort = new AbortController();
+async function pollCalls(token) {
+  if (paused || token !== callsGeneration || !store.get().selectedStop) return;
+  const controller = new AbortController();
+  callsAbort = controller;
+  const signal = controller.signal;
+  const isCurrent = () => !signal.aborted && !paused && token === callsGeneration;
+  let wait = INTERVAL_MS;
   try {
-    await fetchCallsForSelectedStop({ signal: callsAbort.signal });
-    if (myGeneration !== generation) return; // selection changed mid-flight
-  } catch (err) {
-    if (err.name === 'AbortError' || myGeneration !== generation) return;
-    store.set({ errors: { ...store.get().errors, calls: err.message } });
+    await fetchCallsForSelectedStop({ signal, isCurrent });
+    if (isCurrent()) callsFailures = 0;
+  } catch (error) {
+    if (isCurrent()) {
+      wait = failureDelay(++callsFailures, error.retryAfter);
+      store.set({ isCallsLoading: false, errors: { ...store.get().errors, calls: error.message } });
+    }
+  } finally {
+    if (isCurrent() && store.get().selectedStop) {
+      callsTimer = setTimeout(() => pollCalls(token), wait);
+      callsTimer?.unref?.();
+    }
   }
 }
 
-function startLiveVehiclesPolling() {
-  stopLiveVehiclesPolling();
-  pollLiveVehicles();
-  liveVehiclesTimer = setInterval(pollLiveVehicles, LIVE_VEHICLES_INTERVAL_MS);
-}
-
-function stopLiveVehiclesPolling() {
-  if (liveVehiclesTimer) clearInterval(liveVehiclesTimer);
-  liveVehiclesTimer = null;
-  liveVehiclesAbort?.abort();
-}
-
-function startCallsPolling() {
-  stopCallsPolling();
-  pollCalls();
-  callsTimer = setInterval(pollCalls, CALLS_INTERVAL_MS);
-}
-
-function stopCallsPolling() {
-  if (callsTimer) clearInterval(callsTimer);
-  callsTimer = null;
-  callsAbort?.abort();
-}
-
-export function initPoller() {
-  startLiveVehiclesPolling();
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) pause();
-    else resume();
-  });
-}
-
-// Called by stops.js whenever a stop is selected (search result, map click,
-// or a new selection replacing a previous one).
 export function onStopSelected() {
-  generation += 1;
-  startCallsPolling();
+  callsGeneration++;
+  clearTimeout(callsTimer);
+  callsAbort?.abort();
+  callsFailures = 0;
+  if (!paused) void pollCalls(callsGeneration);
 }
 
 export function onStopDeselected() {
-  generation += 1;
-  stopCallsPolling();
-  store.set({ calls: [], isStopCancelled: false, messages: [] });
+  callsGeneration++;
+  clearTimeout(callsTimer);
+  callsAbort?.abort();
+  store.set({ calls: [], isStopCancelled: false, messages: [], isCallsLoading: false, departuresUpdatedAt: null });
 }
 
-function pause() {
+export function pausePolling() {
   paused = true;
-  stopLiveVehiclesPolling();
-  stopCallsPolling();
+  liveGeneration++;
+  callsGeneration++;
+  clearTimeout(liveTimer);
+  clearTimeout(callsTimer);
+  liveAbort?.abort();
+  callsAbort?.abort();
+  nextAt = null;
+  running = false;
 }
 
-function resume() {
-  if (!paused) return;
+export function resumePolling() {
   paused = false;
-  generation += 1; // discard anything that was in flight before pausing
-  startLiveVehiclesPolling();
-  if (store.get().selectedStop) startCallsPolling();
+  clearTimeout(liveTimer);
+  liveAbort?.abort();
+  void pollLiveVehicles(++liveGeneration);
+  if (store.get().selectedStop) onStopSelected();
+}
+
+export function initPoller() {
+  if (initialized) return;
+  initialized = true;
+  if (document.hidden) pausePolling();
+  else resumePolling();
+  document.addEventListener('visibilitychange', () => document.hidden ? pausePolling() : resumePolling());
 }

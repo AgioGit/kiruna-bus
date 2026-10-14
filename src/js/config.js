@@ -1,29 +1,66 @@
-import { api, setProfileHeaders, ApiError } from './api.js';
+import { api, ApiError } from './api.js';
+import { store } from './appState.js';
+import { isCatalog, readCachedCatalog, writeCachedCatalog } from './catalog-cache.js';
+import { synchronizeClock } from './clock.js';
+import { clearSelectedStop } from './stops.js';
 
-let configPromise = null;
-let configOptions = null;
+let current = null;
+let lastAttempt = -Infinity;
+let configOptions = { minZoom: 10, tiles: { urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' } };
 
-// Must resolve before any other endpoint is called (they all require the
-// anyride-profile-data/anyride-profile-display headers this returns).
-export async function loadConfig() {
-  if (configOptions) return configOptions;
-  if (!configPromise) {
-    configPromise = (async () => {
-      const cfg = await api.getConfigOptions('', 'sv');
-      if (!cfg || !cfg.profileData || !cfg.profileDisplay) {
-        throw new ApiError('GetConfigOptions response is missing profileData/profileDisplay');
-      }
-      setProfileHeaders({
-        'anyride-profile-data': cfg.profileData,
-        'anyride-profile-display': cfg.profileDisplay,
-      });
-      configOptions = cfg;
-      return cfg;
-    })();
-  }
-  return configPromise;
+function storageError(error) {
+  console.warn('Basic-information cache unavailable:', error.message);
+  store.set({ errors: { ...store.get().errors, cache: 'Browser cache unavailable; using server-provided basic information.' } });
 }
 
-export function getConfig() {
+export function applyCatalog(catalog, source) {
+  if (!isCatalog(catalog)) throw new ApiError('Basic map information is invalid.', { code: 'INVALID_CATALOG' });
+  if (current && Date.parse(catalog.capturedAt) < Date.parse(current.capturedAt)) return false;
+  const changed = current?.version !== catalog.version;
+  current = catalog;
+  configOptions = catalog.config;
+  const state = store.get();
+  const knownLines = new Set(state.lines.map((line) => line.id));
+  const activeLineIds = new Set(catalog.lines.filter((line) => !knownLines.has(line.id) || state.activeLineIds.has(line.id)).map((line) => line.id));
+  const selectedStop = state.selectedStop ? catalog.stops.find((stop) => stop.id === state.selectedStop.id) : null;
+  if (state.selectedStop && !selectedStop) clearSelectedStop();
+  store.set({
+    ...(changed ? {
+      lines: catalog.lines, activeLineIds,
+      stopLocations: new Map(catalog.stops.map((stop) => [stop.id, { text: stop.text, location: stop.location }])),
+      lineRoutes: new Map(Object.entries(catalog.lineRoutes).map(([id, routes]) => [Number(id), new Set(routes)])),
+      routeGeometry: new Map(Object.entries(catalog.routes).map(([id, route]) => [Number(id), route])),
+      ...(selectedStop ? { selectedStop } : {}),
+    } : {}),
+    catalogInfo: { source, capturedAt: catalog.capturedAt, version: catalog.version },
+    errors: { ...store.get().errors, config: null },
+  });
+  return true;
+}
+
+export async function refreshBootstrap({ signal, isCurrent = () => true, force = false } = {}) {
+  if (!force && Date.now() - lastAttempt < 60000) return;
+  lastAttempt = Date.now();
+  const data = await api.getBootstrap({ signal, timeoutMs: 5000 });
+  if (signal?.aborted || !isCurrent()) return;
+  if (!isCatalog(data?.catalog)) throw new ApiError('Basic map information is invalid.', { code: 'INVALID_CATALOG' });
+  synchronizeClock(data.serverTime);
+  if (applyCatalog(data.catalog, data.source)) await writeCachedCatalog(data.catalog).catch(storageError);
+}
+
+export async function loadConfig() {
+  let cached;
+  try { cached = await readCachedCatalog(); }
+  catch (error) { storageError(error); }
+  if (cached) {
+    applyCatalog(cached, 'browser');
+    void refreshBootstrap({ force: true }).catch((error) => {
+      store.set({ errors: { ...store.get().errors, config: error.message } });
+    });
+  } else {
+    await refreshBootstrap({ force: true });
+  }
   return configOptions;
 }
+
+export function getConfig() { return configOptions; }

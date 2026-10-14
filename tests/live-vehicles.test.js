@@ -35,6 +35,7 @@ test('position freshness includes exactly three minutes, but hides older or unda
 test('a retained bus expires between polls without changing its updated timestamp', async (t) => {
   const now = Date.parse('2026-01-01T10:00:00Z');
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: now + 3600_000 });
+  t.mock.method(performance, 'now', () => Date.now());
   const timestamp = new Date(now - 179_000).toISOString();
   const bus = { journeyId: 7, position: { timestamp }, upcomingStops: [{ stopText: 'A' }] };
   const fetch = t.mock.method(api, 'getBuses', async () => ({
@@ -54,6 +55,7 @@ test('a retained bus expires between polls without changing its updated timestam
 test('a newer fetch replaces the expiry timer and removes already-expired buses', async (t) => {
   const now = Date.parse('2026-01-01T10:00:00Z');
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  t.mock.method(performance, 'now', () => Date.now());
   const bus = (age) => ({ journeyId: 7, position: { timestamp: new Date(now - age).toISOString() } });
   t.mock.method(api, 'getBuses', async () => ({
     serverTime: new Date(now).toISOString(), vehicles: [bus(179_000), bus(180_001)],

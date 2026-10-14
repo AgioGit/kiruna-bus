@@ -6,6 +6,7 @@
 import { store } from './appState.js';
 import { selectStopArea, selectStopByText } from './stops.js';
 import { api } from './api.js';
+import { showNotice } from './notices.js';
 
 const FAVORITES_STORAGE_KEY = 'kiruna-bus-tracker.favoriteStops.v1';
 const NEARBY_MAX_COUNT = 5;
@@ -199,10 +200,7 @@ function renderFavoriteToggle(state) {
 }
 
 function showFavoritesStatus(message) {
-  const el = document.getElementById('favorites-status');
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = !message;
+  showNotice(document.getElementById('favorites-status'), message, { transient: true });
 }
 
 // ---- Nearby stops (explicit button press only) --------------------------
@@ -227,7 +225,7 @@ function findNearbyStops() {
   }
 
   if (button) button.disabled = true;
-  showNearbyStatus('Locating…');
+  showNearbyStatus('Locating…', false);
 
   try {
     navigator.geolocation.getCurrentPosition(
@@ -312,11 +310,8 @@ function renderNearbyStops(stops, origin) {
   }
 }
 
-function showNearbyStatus(message) {
-  const el = document.getElementById('nearby-stops-status');
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = !message;
+function showNearbyStatus(message, transient = true) {
+  showNotice(document.getElementById('nearby-stops-status'), message, { transient });
 }
 
 // ---- Shared pure helpers (exported for tests) ---------------------------

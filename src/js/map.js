@@ -2,12 +2,14 @@ import { getConfig } from './config.js';
 import { store } from './appState.js';
 import { selectStopsNearLocation, selectStopArea } from './stops.js';
 import { colorForLineId } from './lineColors.js';
-import { headingAlongRoute, pathToNextStop } from './routeHeading.js';
+import { headingAlongRoute, pathToUpcomingStops } from './routeHeading.js';
 import { routePartsForVisibleRoutes } from './routeOverlap.js';
 import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from './routeOffset.js';
 import { selectVehicle } from './vehicleSelection.js';
 
 let map = null;
+let tiles = null;
+let appliedConfig = null;
 let vehicleLayer = null;
 let routeLayer = null;
 let stopLayer = null;
@@ -26,6 +28,7 @@ let lastRenderedUpcomingKey = '';
 // every 60s re-render (which would otherwise yank the map view repeatedly
 // while a bus stays selected).
 let lastSelectedJourneyId = null;
+let mapLookupSequence = 0;
 
 // Kiruna, Sweden. GetConfigOptions' centerLat/centerLon were observed
 // returning a generic Boreal default (Kongsberg, Norway) rather than a
@@ -43,12 +46,14 @@ const NEXT_STOP_PANE = 'nextStops';
 // docs/initial_plan.md for why a CDN script tag was used instead of a bundler).
 export function initMap(containerId) {
   const cfg = getConfig();
+  appliedConfig = cfg;
   const minZoom = cfg?.minZoom ?? 10;
 
   map = L.map(containerId, { minZoom }).setView(KIRUNA_CENTER, KIRUNA_ZOOM);
 
   const tileUrl = cfg?.tiles?.urlTemplate ?? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-  L.tileLayer(tileUrl, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  tiles = L.tileLayer(tileUrl, { attribution: '&copy; OpenStreetMap contributors' });
+  tiles.addTo(map);
 
   // Draw order: tiles, routes, next-stop paths, stops, buses (markerPane).
   // Separate panes keep re-added route polylines from landing over stops.
@@ -65,13 +70,15 @@ export function initMap(containerId) {
   observeMapSize(document.getElementById(containerId));
 
   map.on('click', async (e) => {
+    const lookup = ++mapLookupSequence;
+    const selection = store.get().stopSelectionSeq;
     try {
       const stops = await selectStopsNearLocation({ lat: e.latlng.lat, lon: e.latlng.lng });
-      if (stops?.length) {
+      if (lookup === mapLookupSequence && selection === store.get().stopSelectionSeq && stops?.length) {
         selectStopArea(stops[0]);
       }
-    } catch {
-      // Map-click stop lookup failing is non-fatal; search box still works.
+    } catch (error) {
+      if (lookup === mapLookupSequence && selection === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: `Nearby stop search failed: ${error.message}` } });
     }
   });
   map.on('zoomend', () => {
@@ -114,6 +121,12 @@ function observeMapSize(container) {
 
 function render(state, prev) {
   if (!map) return;
+  const cfg = getConfig();
+  if (cfg !== appliedConfig) {
+    if (cfg.minZoom !== appliedConfig?.minZoom) map.setMinZoom(cfg.minZoom);
+    if (cfg.tiles?.urlTemplate !== appliedConfig?.tiles?.urlTemplate) tiles.setUrl(cfg.tiles.urlTemplate);
+    appliedConfig = cfg;
+  }
   const selectedRouteId = state.selectedVehicleJourneyId == null
     ? null
     : state.liveVehicles.find((bus) => bus.journeyId === state.selectedVehicleJourneyId)?.routeId ?? null;
@@ -133,6 +146,7 @@ function render(state, prev) {
   }
   if (!prev || state.stopSelectionSeq !== prev.stopSelectionSeq) renderSelectedStop(state);
   if (!prev || state.liveVehicles !== prev.liveVehicles || state.activeLineIds !== prev.activeLineIds ||
+      state.journeyStops !== prev.journeyStops ||
       state.selectedVehicleJourneyId !== prev.selectedVehicleJourneyId ||
       state.hoveredVehicleJourneyId !== prev.hoveredVehicleJourneyId ||
       state.lineRoutes !== prev.lineRoutes || state.routeGeometry !== prev.routeGeometry ||
@@ -295,10 +309,11 @@ function renderVehicles(state) {
     const isHovered = bus.journeyId != null && bus.journeyId === state.hoveredVehicleJourneyId;
     if (isHovered) wrapperClasses.push('vehicle-icon-wrapper--hover');
     if (isSelected || isHovered) {
-      const path = pathToNextStop(
+      const upcoming = bus.upcomingStops ?? state.journeyStops.get(bus.journeyId) ?? [bus.nextStop, bus.followingStop];
+      const path = pathToUpcomingStops(
         { lat: displayPosition[0], lon: displayPosition[1] },
         routeEntry?.visible ? { locations: routeEntry.renderedLocations } : state.routeGeometry.get(bus.routeId),
-        nextStopLocation
+        upcoming.map((stop) => locationForStopText(state, stop?.stopText))
       );
       if (path) {
         projected.add(key);

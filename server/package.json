@@ -5,10 +5,19 @@
   "description": "API + static host for the Kiruna Live Bus Tracker (wraps the Boreal AnyRide API)",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.11.0"
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "snapshot": "node scripts/snapshot.js",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "leaflet": "1.9.4"
   }
 }

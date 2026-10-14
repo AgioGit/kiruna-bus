@@ -1,0 +1,131 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kiruna Bus application API",
+    "version": "1.0.0",
+    "description": "Same-origin website API, independent of Boreal's upstream contract. Cached basic information is not live data. Live GPS fixes expire after three minutes. Public data does not require authentication; requests and upstream work are bounded."
+  },
+  "jsonSchemaDialect": "http://json-schema.org/draft-07/schema#",
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/api/v1/bootstrap": {
+      "get": {
+        "operationId": "bootstrap",
+        "summary": "Basic map catalog without waiting for upstream",
+        "description": "Returns a validated bundled or refreshed catalog. ETag revalidation is supported. X-Server-Time is the current response time, including on 304, and is separate from catalog.capturedAt.",
+        "responses": {
+          "200": { "description": "Catalog", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/bootstrap" } } } },
+          "304": { "description": "Catalog unchanged; retain cached representation" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/buses": {
+      "get": {
+        "operationId": "buses",
+        "summary": "Read a live snapshot; trigger shared refresh without waiting",
+        "description": "A successful response can be partial or stale: inspect quality and original GPS timestamps. generatedAt is response assembly time, not data freshness. A successful empty scan is distinct from a 503 unknown live picture.",
+        "responses": {
+          "200": { "description": "Vehicle snapshot", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/buses" } } } },
+          "503": { "$ref": "#/components/responses/Error" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/stops": {
+      "get": {
+        "operationId": "stops",
+        "summary": "Located stop catalog",
+        "responses": {
+          "200": { "description": "Stops", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/stops" } } } },
+          "304": { "description": "Stops unchanged" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/stops/{stopId}/departures": {
+      "get": {
+        "operationId": "departures",
+        "summary": "Normalized stop departures and disruptions",
+        "parameters": [{ "name": "stopId", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }],
+        "description": "Uses the same upstream call cache as the tracker. On failure a last-good response can be served as state=stale for at most three minutes from updatedAt. Browser display also expires at that boundary.",
+        "responses": {
+          "200": { "description": "Departures", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/departures" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/routes/{routeId}": {
+      "get": {
+        "operationId": "route",
+        "summary": "Display-ready route geometry with provider corrections applied",
+        "parameters": [{ "name": "routeId", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }],
+        "responses": {
+          "200": { "description": "Geometry", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/route" } } } },
+          "304": { "description": "Geometry unchanged" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "operationId": "searchStops",
+        "summary": "Search the located catalog by stop name or number",
+        "parameters": [{ "$ref": "#/components/parameters/Query" }],
+        "responses": {
+          "200": { "description": "Up to twenty matching stop display strings", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/resolve": {
+      "get": {
+        "operationId": "resolveStop",
+        "summary": "Resolve an exact stop display string from the local catalog",
+        "parameters": [{ "$ref": "#/components/parameters/Query" }],
+        "responses": {
+          "200": { "description": "Stop or null", "content": { "application/json": { "schema": { "anyOf": [{ "$ref": "./server/schemas.json#/definitions/locatedStop" }, { "type": "null" }] } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/nearby": {
+      "post": {
+        "operationId": "nearbyStops",
+        "summary": "Find nearby catalog stops without sending location to Boreal",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/nearbyRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Stops ordered by approximate distance in meters", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/stops" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/live": {
+      "get": { "operationId": "liveness", "summary": "Process liveness; independent of provider availability", "responses": { "200": { "description": "Process is alive" }, "default": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/api/ready": {
+      "get": { "operationId": "readiness", "summary": "Valid baseline is available and process is not draining", "responses": { "200": { "description": "Ready, even if live data is degraded" }, "503": { "description": "Not ready or shutting down" }, "default": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/api/status": {
+      "get": { "operationId": "dataStatus", "summary": "Sanitized coverage, freshness, queue and bounded aggregate metrics", "responses": { "200": { "description": "Operational status; does not trigger upstream work" }, "default": { "$ref": "#/components/responses/Error" } } }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Query": { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
+    },
+    "responses": {
+      "Error": {
+        "description": "Structured error. 400 invalid request, 404 unknown resource, 405 wrong method, 413 body too large, 415 unsupported media, 429 rate limit, 502 invalid/unavailable upstream, 503 warming/overload, 504 upstream timeout. Retry-After is seconds where supplied. Methods and unknown/repeated query parameters are validated.",
+        "headers": {
+          "Retry-After": { "schema": { "type": "integer", "minimum": 0 } },
+          "X-Request-Id": { "schema": { "type": "string" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/error" } } }
+      }
+    }
+  }
+}

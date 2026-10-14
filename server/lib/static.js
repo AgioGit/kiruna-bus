@@ -64,6 +64,12 @@ export async function serveStatic(req, res, root, pathname) {
     res.end();
     return true;
   }
-  createReadStream(filePath).pipe(res);
+  const stream = createReadStream(filePath);
+  stream.on('error', (error) => {
+    console.error(JSON.stringify({ event: 'static_read_failed', code: error.code }));
+    res.destroy();
+  });
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
   return true;
 }

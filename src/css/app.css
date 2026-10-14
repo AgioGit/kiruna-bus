@@ -147,6 +147,19 @@ body {
   border: 1px solid var(--color-info);
 }
 
+.notice {
+  transition: opacity 0.3s ease;
+}
+
+.notice-fading {
+  opacity: 0;
+}
+
+.status-message + .status-message::before {
+  content: ' | ';
+  white-space: pre;
+}
+
 .app-layout {
   display: flex;
   flex-direction: column;
@@ -824,6 +837,10 @@ button.vehicle-card {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .notice {
+    transition: none;
+  }
+
   .vehicle-next-stop-path {
     animation: none;
   }

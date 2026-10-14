@@ -1,18 +1,10 @@
-import { api } from './api.js';
 import { store } from './appState.js';
 
 // One-time client/server clock offset so countdowns aren't skewed by the
 // visitor's system clock.
-export async function initClockOffset() {
-  try {
-    const clientTimestamp = new Date().toISOString();
-    const resp = await api.getSystemTimestamp(clientTimestamp);
-    const serverTime = new Date(resp.systemTimestamp).getTime();
-    const clientTime = new Date(resp.clientTimestamp).getTime();
-    store.set({ clockOffsetMs: serverTime - clientTime });
-  } catch {
-    store.set({ clockOffsetMs: 0 });
-  }
+export function synchronizeClock(serverTime) {
+  const timestamp = Date.parse(serverTime);
+  if (Number.isFinite(timestamp)) store.set({ clockOffsetMs: timestamp - Date.now() });
 }
 
 export function now() {

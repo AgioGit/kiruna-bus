@@ -23,6 +23,11 @@ function fixture() {
       this.hidden = false;
       this.disabled = false;
       this.attributes = {};
+      const classes = new Set();
+      this.classList = {
+        add: (name) => classes.add(name),
+        remove: (name) => classes.delete(name),
+      };
       if (id) elements.set(id, this);
       parent?.appendChild(this);
     }
@@ -245,10 +250,15 @@ test('Clear stays in departures across refreshes and returns focus to the closed
     select();
     assert.equal(arrivals.hidden, false);
     assert.equal(stopName.textContent, 'Center');
-    store.set({ calls: [] });
+    store.set({
+      calls: [],
+      errors: { ...store.get().errors, calls: 'Previous departure failure', stopNotFound: 'Previous lookup failure' },
+    });
     assert.equal(clear.parent, arrivals);
     clear.click();
     assert.equal(store.get().selectedStop, null);
+    assert.equal(store.get().errors.calls, null);
+    assert.equal(store.get().errors.stopNotFound, null);
     assert.equal(arrivals.hidden, true);
     assert.equal(content.innerHTML, '');
     assert.equal(elements.get('stop-search').value, '');

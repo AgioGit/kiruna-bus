@@ -53,6 +53,22 @@ export function pathToNextStop(position, geometry, nextStopLocation) {
   ];
 }
 
+export function pathToUpcomingStops(position, geometry, stopLocations) {
+  const stops = stopLocations.slice(0, 3).filter((stop) => stop?.lat != null && stop?.lon != null);
+  if (!stops.length || position?.lat == null || position?.lon == null) return null;
+  const path = [];
+  let from = position;
+  stops.forEach((stop, index) => {
+    const segment = pathToNextStop(from, geometry, stop);
+    // Keep intermediate stops on the rendered lane; only the last stop
+    // needs a connection from the route to its actual coordinates.
+    const points = index < stops.length - 1 && segment.length > 2 ? segment.slice(0, -1) : segment;
+    for (const point of points.slice(path.length ? 1 : 0)) path.push(point);
+    const end = points.at(-1);
+    from = { lat: end[0], lon: end[1] };
+  });
+  return path;
+}
 function nearestSegment(location, locations, latitudeScale) {
   const point = { x: location.lon * latitudeScale, y: location.lat };
   let nearest = null;

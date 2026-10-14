@@ -326,3 +326,121 @@ test('getStops returns each stop with its coordinates, resolved once', async () 
   await tracker.getStops();
   assert.equal(fake.counts.findStop, 2);
 });
+
+test('partial scan preserves failed stops without reporting a fully healthy scan', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  const initial = await tracker.getBuses();
+  const getCalls = fake.api.getCalls;
+  fake.api.getCalls = (stop) => stop === 'A' ? Promise.reject(new Error('down')) : getCalls(stop);
+  fake.state.now += 190000;
+  const partial = await tracker.getBuses();
+  assert.deepEqual(partial.quality.scan, { attempted: 2, succeeded: 1, failed: 1 });
+  assert.equal(partial.quality.state, 'partial');
+  assert.equal(partial.quality.lastScanAt, initial.quality.lastScanAt);
+  assert.match(partial.error, /Some stops/);
+  assert.equal(partial.vehicles[0].nextStop.stopText, 'A');
+  tracker.close();
+});
+
+test('versioned snapshot reads never await an in-progress refresh', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  await tracker.refresh();
+  let release;
+  fake.api.getVehiclePosition = () => new Promise((resolve) => { release = resolve; });
+  fake.state.now += 20000;
+  const pending = tracker.refresh();
+  const cached = await tracker.getSnapshot();
+  assert.equal(cached.vehicles.length, 1);
+  assert.equal(tracker.status().refreshing, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  release({ location: { lat: 67.85, lon: 20.22 }, timestamp: new Date(fake.state.now).toISOString() });
+  await pending;
+  tracker.close();
+});
+
+test('cold versioned API reports warming up; successful empty service is healthy', async () => {
+  const fake = fakeApi();
+  fake.api.getCalls = async () => ({ calls: [] });
+  const tracker = trackerWith(fake);
+  await assert.rejects(tracker.getSnapshot(), { code: 'WARMING_UP', status: 503 });
+  await tracker.refresh();
+  const empty = await tracker.getSnapshot();
+  assert.deepEqual(empty.vehicles, []);
+  assert.equal(empty.quality.state, 'fresh');
+  tracker.close();
+});
+
+test('whole refresh deadline releases stuck work even when an adapter ignores abort', async () => {
+  const fake = fakeApi();
+  fake.api.getCalls = () => new Promise(() => {});
+  const tracker = createTracker({ api: fake.api, options: { refreshTimeoutMs: 20 } });
+  const keepAlive = setTimeout(() => {}, 500);
+  await tracker.refresh();
+  clearTimeout(keepAlive);
+  assert.equal(tracker.status().refreshing, false);
+  await assert.rejects(tracker.getSnapshot(), { status: 503 });
+  tracker.close();
+});
+
+test('healthy 60-second polling does not mark cached snapshots stale while refreshing', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  try {
+    await tracker.refresh();
+    for (let poll = 1; poll <= 8; poll++) {
+      fake.state.now = T0 + poll * 60000;
+      const cached = await tracker.getSnapshot();
+      assert.equal(cached.quality.state, 'fresh', JSON.stringify(cached.quality));
+      assert.deepEqual(cached.quality.reasons, []);
+      assert.equal(cached.quality.positions.expired, 0);
+      assert.equal(cached.vehicles.length, 1);
+      await tracker.refresh();
+    }
+  } finally { tracker.close(); }
+});
+
+test('GPS expiry is reflected in cached quality even before a blocked refresh finishes', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  try {
+    await tracker.refresh();
+    const first = await tracker.getSnapshot();
+    let release;
+    fake.api.getVehiclePosition = () => new Promise((resolve) => { release = resolve; });
+    fake.state.now = Date.parse(first.vehicles[0].position.timestamp) + 180000;
+    const pending = tracker.refresh();
+    await new Promise((resolve) => setImmediate(resolve));
+    const boundary = await tracker.getSnapshot();
+    assert.equal(boundary.quality.state, 'fresh');
+    assert.equal(boundary.quality.positions.expired, 0);
+    assert.equal(boundary.vehicles.length, 1);
+    fake.state.now++;
+    const expired = await tracker.getSnapshot();
+    assert.equal(expired.quality.state, 'stale');
+    assert.ok(expired.quality.reasons.includes('GPS_OLD'));
+    assert.equal(expired.quality.positions.expired, 1);
+    assert.equal(expired.vehicles.length, 0);
+    release({ location: { lat: 67.85, lon: 20.22 }, timestamp: new Date(fake.state.now).toISOString() });
+    await pending;
+    assert.equal((await tracker.getSnapshot()).quality.state, 'fresh');
+  } finally { tracker.close(); }
+});
+
+test('collection age warnings use snapshot lifetimes rather than refresh TTLs', async () => {
+  const fake = fakeApi();
+  fake.api.getCalls = async () => ({ calls: [] });
+  const tracker = trackerWith(fake);
+  try {
+    await tracker.refresh();
+    fake.state.now = T0 + 180000;
+    assert.equal(tracker.quality().state, 'fresh');
+    fake.state.now++;
+    assert.ok(tracker.quality().reasons.includes('POSITIONS_OLD'));
+    fake.state.now = T0 + 360000;
+    assert.equal(tracker.quality().reasons.includes('SCAN_OLD'), false);
+    fake.state.now++;
+    assert.ok(tracker.quality().reasons.includes('SCAN_OLD'));
+  } finally { tracker.close(); }
+});

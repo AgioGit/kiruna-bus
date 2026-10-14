@@ -1,272 +1,160 @@
-# Data Flow — Current Implementation
+# Current data flow
 
-Describes how data actually moves through the app, end to end: the server in
-`/server` (which talks to Boreal), and the browser code in `/src` (which only
-talks to the server). See `API.md` for the underlying endpoint contracts, and
-`initial_plan.md` for the design rationale/history (written when scanning ran
-in the browser; that logic now lives in `server/lib/tracker.js`).
+The application is served by one scale-to-zero Node container. The browser uses
+the versioned application API, not Boreal's protocol. See
+[the application contract](../application.openapi.json) and
+[server operations](../server/README.md). `openapi.yaml` and `API.md` describe
+the separate upstream API; `initial_plan.md` is historical.
 
-## 0. The server (`/server`)
+## Startup
 
-```
-Browser ──► /api/buses, /api/stops, /api/<BorealEndpoint> ──► server ──► Boreal
-```
+```text
+Container starts
+  -> load configuration and validate bundled catalog (fail explicitly if invalid)
+  -> listen for static assets, bootstrap, probes, and API calls
+  -> start one bounded live warmup, without holding bootstrap requests
 
-- `/api/buses` — every running bus (position, line, destination, next two
-  stops with planned/forecast times, age/stale flag) plus `lineRoutes`
-  (`{ lineId: routeId[] }`). Built by `tracker.js`:
-  - **Stop scan** every ~3 min (or earlier after a failed position fetch,
-    at most every 30 s): `GetCalls` for every stop, grouped by `journeyId`
-    into ordered stop lists. A journey's `positionCallIds` are the call ids
-    of its last stop.
-  - **Positions** at most every 15 s: `GetVehiclePosition` per journey,
-    deduped by `(lat, lon, timestamp)` onto the journey with the soonest
-    future forecast. `nextStop`/`followingStop`/`ageMs` are computed per
-    request using the Boreal-corrected clock.
-  - Refresh is lazy (only when a request finds data expired), concurrent
-    requests share one refresh, and failures keep serving the last data with
-    `error` set. Missing fixes retain their GPS timestamp and are marked
-    stale; cached journey fixes also survive disappearing/changing call ids.
-    Positions older than three minutes are omitted.
-- `/api/stops` — `[{ id, text, location }]`, coordinates resolved once.
-- `/api/<BorealEndpoint>` — allow-listed passthrough with short TTL caches
-  (`passthrough.js`) that injects the Kiruna profile headers, so the
-  browser code can call the unchanged endpoints (`GetLines`, `GetCalls`,
-  `GetMapRoute`, `FindStopArea`, ...).
-- Everything else is static files from `src/`.
-
-## 1. Startup sequence (`main.js`)
-
-```
-main()
- ├─ 1. loadConfig()                     [config.js]   ── must succeed first
- │     GetConfigOptions → store profile headers, tile URL, minZoom
- │     (fails → visible fatal error, nothing else runs)
- │
- ├─ 2. loadLines() + initClockOffset()  [lines.js, clock.js]  ── parallel
- │     GetLines            → store.lines
- │     GetSystemTimestamp  → store.clockOffsetMs (server - client time)
- │
- ├─ 3. initMap('map')                   [map.js]
- │     creates Leaflet map centered on hardcoded Kiruna coords,
- │     subscribes to the store, does an initial render() from empty state
- │
- ├─ 4. initUi()                         [ui.js]
- │     wires the stop-search box, subscribes to the store, does an
- │     initial render of (empty) filters/cards/status
- │
- ├─ 5. initCommuter()                   [commuter.js]
- │     restores favorite stops and wires on-demand nearby-stop lookup
- │
- ├─ 6. initPoller()                     [poller.js]
- │     starts the live-bus polling schedule (see §3)
- │
- └─ 7. initCountdown()                  [countdown.js]
-       shows "(update in: N s)" in the header, read from poller.js
+Browser loads
+  -> read compatible IndexedDB basic catalog, if available
+  -> fetch /api/v1/bootstrap and keep the newer compatible capture
+  -> populate lines, stop locations, route catalog, and corrected geometry
+  -> initialize UI/map and show catalog provenance/capture time
+  -> poll live buses and selected-stop departures
 ```
 
-All of `map.js`/`ui.js` render purely as a **function of the shared
-store** (`appState.js`) — nothing renders by being called directly by the
-things that fetch data. Every fetch just calls `store.set(...)`, which
-notifies subscribers, which re-render. This is the one data-flow rule that
-holds throughout the app.
+One container still means the first navigation waits for the host's cold start.
+After that, basic information does not wait for a Boreal scan. IndexedDB failures
+are nonfatal and visible. If basic API startup fails, the map shell and error
+remain usable rather than stopping the entire application initialization.
 
-## 2. The shared store (`appState.js` + `state.js`)
+The bundled file and IndexedDB contain only public basic information. They do
+not contain positions, departures, personal location, or upstream profile
+headers. A newer compatible browser catalog is not overwritten by an older
+bundled fallback. Browser writes also compare captures inside one transaction.
 
-A minimal pub/sub object (`state.js`'s `createStore`) holds the single
-source of truth. Every other module either **writes** to it (fetch/derive
-modules) or **reads + subscribes** to it (`map.js`, `ui.js`). No module
-talks to another rendering module directly.
+## Backend boundaries
 
-Key fields and who writes them:
+`server/app.js` constructs a testable HTTP application; `server/index.js` handles
+listening, startup warmup, and bounded shutdown. Importing the application does
+not start a listener or contact Boreal.
 
-| Field | Written by | Read by |
-|---|---|---|
-| `lines`, `activeLineIds` | `lines.js`, `filters.js` | `map.js`, `ui.js` |
-| `selectedStop`, `calls`, `isCallsLoading`, `isStopCancelled`, `messages` | `stops.js`, `calls.js`, `poller.js` | `ui.js` |
-| `liveVehicles` | `live-vehicles.js` (from `/api/buses`) | `map.js`, `ui.js` (primary live-bus source) |
-| `journeyStops` | `live-vehicles.js` (from each bus's `upcomingStops`) | `ui.js` (selected bus trip), `map.js` (upcoming-stop emphasis) |
-| `lineRoutes`, `routeGeometry` | `routes.js` (`mergeLineRoutes`, `recordRouteIdsFromCalls`, `fetchGeometries`) | `map.js` (route polylines) |
-| `stopLocations` | `stop-locations.js` (from `/api/stops`) | `map.js` (stop circles) |
-| `selectedVehicleJourneyId` | `vehicleSelection.js` (bus card/marker click) | `map.js` (marker highlight/pan), `ui.js` (card expansion) |
-| `clockOffsetMs` | `clock.js` | `ui.js` (countdowns) |
-| `errors.*` | every fetch module, on failure | `ui.js` (`renderStatus`) |
+All upstream calls use `server/lib/boreal.js`: one scheduler, successful-result
+cache, canonical request keys, in-flight coalescing, byte limits, and deadlines
+through body consumption. Interactive requests have reserved capacity.
+Transient retries are bounded; schema/permanent errors are not retried as if
+they were network outages. Cancelling one waiter does not cancel shared work.
 
-## 3. Continuous polling loops (`poller.js`)
+`server/schemas.json` is referenced by the application contract and compiled by
+Ajv. Upstream validation accepts harmless additional fields but requires valid
+essential coordinates, identifiers, timestamps, and shapes. Application DTOs
+are normalized before they reach the browser.
 
-Two schedules run from `poller.js`, both using `AbortController`; a shared
-`generation` counter is bumped on stop select/deselect and pause/resume so
-responses tied to stale UI state are discarded.
+## Basic catalog and routes
 
-1. **`pollLiveVehicles`** (60s) — one request per tick:
-   ```
-   refreshLiveVehicles()                     [live-vehicles.js]
-     GET /api/buses
-     → drop buses whose next stop is > 10 min away or position is > 3 min old
-     → store.set({ liveVehicles, journeyStops, errors.vehicles = data.error })
-     → mergeLineRoutes(data.lineRoutes)      [routes.js]
-          add to lineRoutes; GetMapRoute for each new routeId
-          → store.routeGeometry
-   refreshStopLocations()                    [stop-locations.js]
-     GET /api/stops (only until loaded)  → store.stopLocations
-   ```
-   Self-guards against overlapping ticks (`liveVehiclesRunning`) since the
-   very first request can take several seconds while the server warms up.
-   The browser never talks to Boreal's scan endpoints; the server's caches
-   decide when Boreal is actually contacted (§0).
-   A local expiry timer removes old positions between polls using the
-   response's server clock plus elapsed client time, without changing GPS
-   timestamps or making another request.
+`catalog.js` serves the bundled catalog immediately. Bootstrap requests may
+trigger an hourly shared background capture; failures preserve the previous
+catalog and back off. Jobs have a whole-operation deadline and are disposable
+if the host terminates the container.
 
-2. **`pollCalls`** (60s, only while a stop is selected) —
-   `fetchCallsForSelectedStop` [`calls.js`] calls `GetCalls` (via the
-   server's cached passthrough) for `store.selectedStop`, flattens
-   `CallGroup.calls`, updates `store.calls`/`isStopCancelled`/`messages`,
-   and feeds the same calls into `recordRouteIdsFromCalls`.
+The explicit `npm run snapshot` command uses the same validated capture logic.
+It requires complete capture/coverage and writes atomically only on success.
+It does not run in tests, image builds, or ordinary startup.
 
-   Route geometry is cached in `store.routeGeometry` for the page session.
-   `routes.js` shares an in-flight request when concurrent scans discover
-   the same route. For the red LKAB-bound shape `540298`, the API currently
-   bypasses Skrädaregatan; `routes.js` fetches return shape `535423` and
-   replaces only the Adolf Hedinsvägen–LKAB approach with its reverse.
-   This correction checks both endpoints and Skrädaregatan, leaves an
-   already-corrected upstream shape alone, and reports `errors.routes`
-   rather than displaying an uncorrected path if it cannot be applied.
-   `map.js` keeps each Leaflet polyline and its route
-   coordinates until that route's geometry changes; filtering only hides
-   or shows it, and selecting a bus changes its style in place. Shared
-   segments of differently colored active routes use parallel screen-pixel
-   offsets with a 1 px gap, tapering back at each end. Unshared segments
-   follow the original geometry. Zooming recomputes only the offset paths;
-   bus markers near a shared segment are placed on their own line's lane
-   (distant GPS positions stay untouched). Panning and normal live updates
-   do not rebuild the route layers.
+Route associations are discovered from calls and retained in the accepted basic
+catalog for use outside service hours. The server applies the guarded LKAB
+geometry correction. Unknown routes can be fetched lazily with a bounded
+in-memory cache. The browser does not perform provider-specific discovery or
+corrections; it still computes visual route overlap, lane offsets, heading
+fallback, and dotted previews through up to three upcoming stops for selected
+or hovered buses. Previews use the displayed route lane and fall back to fewer
+stops when fewer are available.
 
-Both loops pause on `document.visibilitychange` (tab hidden) and, on
-resume, bump `generation` (discarding stale in-flight responses) before
-restarting.
+Bootstrap, stops, and route resources support ETag revalidation. Current
+`X-Server-Time` is separate from the catalog capture and original GPS times.
 
-## 4. Map rendering (`map.js`)
+## Live snapshots and partial failures
 
-Subscribed to the store; updates only layers whose inputs change:
+`tracker.js` scans calls per stop about every three minutes and positions at most
+every 15 seconds. Demand triggers one shared refresh, not permanent polling.
+Startup is the sole unconditional warmup.
 
-- **Routes**: for each active line id in `activeLineIds`, for each
-  `routeId` in `lineRoutes.get(lineId)`, draws a polyline from
-  `routeGeometry.get(routeId).locations`, colored via
-  `colorForLineId(lineId)` (parses the Swedish color word out of the
-  line's `text`, see `lineColors.js` — not `lineAppearance`, which was
-  observed unreliable). The selected bus's route is emphasized.
-- **Vehicles**: iterates `state.liveVehicles`, skips any whose `lineId`
-  isn't in `activeLineIds`, and draws an `L.marker` with an `L.divIcon` at
-  `position.location`. The arrow uses `position.heading` when reported;
-  otherwise its direction is derived from the nearest segment of
-  `routeGeometry[bus.routeId]`, oriented toward `bus.nextStop` (or a dot is
-  used until both route and stop geometry are available). Markers are
-  colored by `colorForLineId(bus.lineId)` (gray if
-  uncorrelated), faded if `bus.stale`, with a tooltip showing line →
-  destination → next stop (and staleness age if stale). When
-  `bus.journeyId === state.selectedVehicleJourneyId` the marker gets a
-  scaled/glowing wrapper class; on the render immediately following a
-  selection change (tracked via a module-level `lastSelectedJourneyId`)
-  the map pans to it once and opens its tooltip for 3 seconds. Markers are
-  reused and moved as new fixes arrive; clicking one selects its journey.
-  Hovered and selected buses also have an animated dotted connection to the
-  current next stop. It follows the rendered route lane between the two
-  projected positions, including pixel offsets and junction tapers, and
-  updates with zoom and line filtering. Route-part order and orientation
-  are restored before clipping the connection, since lane styles group
-  disjoint stretches and shared runs may be reversed. Dots are above routes
-  and below stop markers, with a direct connection until route
-  geometry is available; missing stop coordinates omit the connection.
-  The animation respects reduced-motion preferences.
-- **Stops**: a small `circleMarker` for every entry in
-  `state.stopLocations`, on its own layer between the routes and the
-  vehicles, with the stop name as a tooltip. The currently selected stop
-  is drawn larger and in blue; the selected journey's upcoming stops are
-  highlighted. Clicking a circle calls `selectStopArea`
-  directly (with `bubblingMouseEvents: false`) — the circle would
-  otherwise swallow the map-level click that resolves a stop via
-  `FindStopsNearLocation`.
-- **Stop selection**: a map click calls `FindStopsNearLocation`
-  [`stops.js`], and on a hit, marks the clicked stop and calls
-  `selectStopArea`, which updates `store.selectedStop` (triggering
-  `poller.js`'s `onStopSelected`, starting the calls-polling loop). Selecting
-  through search or shortcuts also pans the map to the chosen stop once.
+Successful stop results replace that stop's previous calls, including empty
+results. Failed stops can retain their original results for two scan intervals.
+Coverage explicitly reports attempted, successful, and failed stop counts.
+Incomplete data is not reported as an entirely healthy scan.
 
-## 5. UI rendering (`ui.js`)
+Positions retain original GPS timestamps and newer known fixes win over
+out-of-order responses. Journey/call-ID changes can reuse unexpired previous
+fixes. Failed, absent, and expired fixes are distinguished in status. Positions
+older than three minutes are omitted, including a selected bus.
 
-Also subscribed to the store; re-renders only the pieces whose inputs change:
+`GET /api/v1/buses` never waits for a refresh. It returns a usable snapshot with
+fresh/partial/stale quality, source-refresh timestamps, coverage, and reasons.
+With no usable live picture it returns structured `503` plus `Retry-After`.
+A fully successful empty service period remains a valid empty response.
+Response assembly time is never used to rejuvenate a GPS fix.
 
-- **Line filters**: checkbox list inside the collapsed Lines disclosure;
-  checked state from
-  `activeLineIds`. Toggling calls `filters.js`'s `toggleLine`, which
-  **only** flips `activeLineIds` (no network call) — except turning a
-  line *on* also calls `ensureLineRouteDiscovered(lineId)` as a
-  just-in-case fallback probe if that line's route geometry is still
-  completely unknown (normally already populated via `/api/buses`).
-- **Live bus cards**: same `state.liveVehicles` data as the map
-  markers, filtered by `activeLineIds` and to buses whose last position
-  fix is at most three minutes old (including the selected bus), one card per physical
-  bus. Each selectable button carries a `data-journey-id`; a delegated click
-  listener (bound once, since the list's `innerHTML` is rebuilt every
-  tick) calls `selectVehicle(journeyId)` [`vehicleSelection.js`], which
-  toggles `state.selectedVehicleJourneyId` — pure client-side state, no
-  refetch — previewing the next three stops from `state.journeyStops`
-  (with a disclosure for the rest) and highlighting the map marker.
-  Late ETAs show a red `(+N min)` immediately after each timestamp. A
-  shared early difference is summarized once above the trip stops.
-  Keyboard focus is preserved across position updates.
-  On desktop the page is bounded to the viewport; the live-bus panel and
-  sidebar scroll rather than letting expanded content escape vertically.
-- **Departure cards**: from `state.calls` (the selected stop's flattened
-  departures), filtered by `activeLineIds`, joined against
-  `state.messages` for disruption banners, with a cancelled-stop banner
-  when `isStopCancelled`. No card is shown before a stop is selected;
-  `isCallsLoading` distinguishes an initial fetch from a true empty result.
-- **Status banner**: surfaces `state.errors.*` (config/lines/vehicles/
-  calls/stopNotFound) without clearing previously-good data underneath.
+The 15-second position refresh TTL and three-minute scan interval schedule
+background work; reaching either is not itself a stale-data condition. Cached
+responses remain usable during normal 60-second browser polling. Position
+collection age becomes stale after three minutes, and scan age after the
+two-interval retention window. GPS expiry is evaluated at response time, even
+while a refresh is still running, so genuinely expired fixes are still hidden
+and reported immediately.
 
-## 6. Stop search flow (`stops.js`)
+## Browser state and polling
 
-```
-user types → debounced Autocomplete(query)        [stops.js]
-           → user picks a result
-           → FindStopArea(StopAreaQuery) or
-             FindStopsNearLocation (map click)
-           → selectStopArea(stop)
-                store.set({ selectedStop: stop, calls: [], isCallsLoading: true })
-                poller.onStopSelected() → generation += 1, starts pollCalls
+The existing one-way flow remains:
+
+```text
+API/cache -> fetch/derive modules -> appState store -> map/UI subscribers
 ```
 
-Deselecting a stop (`clearSelectedStop`) does the reverse: bumps
-`generation`, stops the calls-polling loop, and clears
-`calls`/`isCallsLoading`/`isStopCancelled`/`messages` from the store.
+`config.js` applies basic catalogs while preserving filters, map position, and
+the selected stop when still present. Removed selections are reconciled.
+Favorites remain in their existing browser-local storage.
 
-## 7. End-to-end picture
+`api.js` covers response-body consumption with its deadline, removes abort
+listeners, parses structured errors, and distinguishes cancellation, timeout,
+network, and HTTP errors. It reads `Retry-After` and current server time.
 
-```
-Boreal AnyRide API
-        │ HTTP (server-side only; cached, rate-limited by TTLs)
-        ▼
-server (tracker.js, passthrough.js)  ── also serves src/
-        │ /api/buses, /api/stops, /api/<endpoint>
-        ▼
-api.js (timeout, cancellation, typed errors)
-        │
-        ▼
-poller.js + fetch/derive modules
-  ├─ pollLiveVehicles (60s) → /api/buses (+ /api/stops until loaded)
-  └─ pollCalls (60s while a stop is selected)
-        │ store.set(...)
-        ▼
-appState.js shared store
-        │ subscriber notification
-        ▼
-map.js + ui.js (render state; no direct API fetches)
-```
+`poller.js` uses non-overlapping completion-scheduled timers. Healthy polls stay
+at 60 seconds; failures use capped jittered backoff. Countdown reflects the next
+actual attempt. Hidden tabs abort/pause work and visible tabs refresh immediately.
+Live and selected-stop requests use independent generation guards checked before
+state writes, so selection changes and late responses cannot overwrite current
+state. Basic-information fetches do not depend on successful live tracking.
 
-Everything downstream of `api.js` ends up as a `store.set(...)` call;
-everything upstream of the store (`map.js`, `ui.js`) only ever reads state
-and never fetches — this one-directional flow (fetch → store → render) is
-what keeps polling, filtering, and stop-selection from stepping on each
-other.
+`live-vehicles.js` expires positions between polls using server time plus
+monotonic elapsed browser time. `calls.js` consumes flat departures and expires
+their retained display after three minutes. UI status distinguishes cached basic
+information, warming/unavailable tracking, partial coverage, stale departures,
+and valid empty results.
+
+Transient search, nearby-location, and optional browser-storage notices begin
+fading after ten seconds. New notices replace old timers; unrelated refreshes
+do not extend them. Active live-data, departure, route, and startup failures
+remain visible until recovery or until their context is cleared.
+
+Search/resolve/nearby endpoints use the server's local stop catalog. Nearby
+coordinates are not forwarded to Boreal or included in request logs. Browser
+geolocation remains an explicit user action.
+
+## Operational and compatibility surfaces
+
+Liveness is independent of Boreal. Readiness requires a usable basic catalog and
+not draining, not active journeys. `/api/status` provides sanitized coverage,
+timestamps, scheduler state, and bounded aggregate metrics.
+
+API requests have per-client/global limits and explicit overload responses.
+Forwarded IP addresses are trusted only with explicit configuration for one
+trusted ingress. Logs contain request/refresh IDs and sanitized route names,
+not raw queries or location payloads.
+
+Unversioned bus/stop/health and allow-listed passthrough routes remain temporarily
+for old pages. Their response shapes are preserved and use is counted.
+Legacy removal is a later deliberate change, not part of this migration.
+
+CI runs network-independent unit/HTTP and browser flows, then smoke-tests the
+built image with upstream deliberately unavailable before publication. Production
+deployment and rollback use immutable image references and remain manual.

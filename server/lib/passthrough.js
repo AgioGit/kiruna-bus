@@ -1,4 +1,4 @@
-import { borealRequest } from './boreal.js';
+import { borealRequest, cacheKey } from './boreal.js';
 import { TtlCache } from './cache.js';
 
 // Endpoints the browser may call through /api/<name>. Anything else is 404.
@@ -43,7 +43,7 @@ export function createPassthrough({ cache = new TtlCache(), request = borealRequ
     const ttl = TTL_MS[path];
     if (!ttl) return { ...(await load()), cache: 'BYPASS' };
 
-    const key = `${method} ${path}${search} ${body ?? ''}`;
+    const key = cacheKey(path, { method, search, body });
     const hit = cache.get(key);
     if (hit) return { ...hit, cache: 'HIT' };
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pathToNextStop } from '../src/js/routeHeading.js';
+import { pathToNextStop, pathToUpcomingStops } from '../src/js/routeHeading.js';
 
 const locations = [
   { lat: 67.85, lon: 20.20 },
@@ -31,4 +31,27 @@ test('projection uses a direct connection before route geometry loads and omits 
   const stop = locations[1];
   assert.deepEqual(pathToNextStop(position, null, stop), [[67.85, 20.20], [67.85, 20.21]]);
   assert.equal(pathToNextStop(position, geometry, null), null);
+});
+
+test('preview follows three upcoming stops in either route direction without reaching the fourth', () => {
+  const position = { lat: 67.85, lon: 20.205 };
+  const stops = [locations[1], { lat: 67.855, lon: 20.21 }, locations[2], locations[3]];
+  const path = pathToUpcomingStops(position, geometry, stops);
+  assert.deepEqual(path[0], [position.lat, position.lon]);
+  assert.deepEqual(path.at(-1), [locations[2].lat, locations[2].lon]);
+  assert.ok(path.some(([lat, lon]) => lat === 67.855 && lon === 20.21));
+  assert.ok(path.every(([, lon]) => lon <= locations[2].lon));
+  assert.deepEqual(pathToUpcomingStops(position, { locations: [...locations].reverse() }, stops), path);
+  const backward = pathToUpcomingStops(locations[3], geometry, [locations[2], stops[1], locations[1]]);
+  assert.deepEqual(backward.at(-1), [locations[1].lat, locations[1].lon]);
+});
+
+test('preview handles fewer or unlocated stops and missing route geometry', () => {
+  const position = locations[0];
+  assert.deepEqual(pathToUpcomingStops(position, null, [locations[1], locations[2]]),
+    [[position.lat, position.lon], [locations[1].lat, locations[1].lon], [locations[2].lat, locations[2].lon]]);
+  assert.deepEqual(pathToUpcomingStops(position, geometry, [null, locations[1]]),
+    pathToNextStop(position, geometry, locations[1]));
+  assert.equal(pathToUpcomingStops(position, geometry, [null, null, null, locations[3]]), null);
+  assert.equal(pathToUpcomingStops(position, geometry, []), null);
 });

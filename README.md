@@ -1,11 +1,11 @@
 # Kiruna Live Bus Tracker
 
 A browser-based live transit map for Kiruna, Sweden, built with plain
-HTML/CSS/JavaScript and Leaflet, plus a small dependency-free Node server.
+HTML/CSS/JavaScript and Leaflet, plus a small native Node HTTP server.
 The Boreal AnyRide API sends no CORS headers, so browsers cannot call it
 directly. The server fetches and caches the data once and serves both the
-JSON API the page uses and the page itself. There is no build step or
-database.
+versioned application API the page uses and the page itself. Ajv validates data
+at the server boundary. There is no application build step or database.
 
 ## Features
 
@@ -35,7 +35,8 @@ database.
   three stops and offers the rest on demand, with expected times and delays.
   Hovering or selecting a bus draws an animated dotted path along its rendered
   route lane, including shared-road offsets and junction tapers, to its
-  current next stop (a direct connection until route geometry loads).
+  next three upcoming stops when available (direct connections until route
+  geometry loads).
   The dots render above route lines but below stop markers.
   The dots stop moving when reduced motion is requested.
 - All bus stops shown as clickable circles; selecting one displays its
@@ -55,7 +56,8 @@ database.
 - Automatic refresh every 60 seconds, with a "(update in: N s)" countdown in
   the header; polling pauses in a hidden browser tab and resumes immediately
   when the tab becomes visible. Existing bus markers move in place rather
-  than being recreated.
+  than being recreated. Transient notices fade after 10 seconds; ongoing
+  failures remain visible.
 - Missing buses retain their last known position and original Updated time,
   including when their calls disappear from a scan. Positions older than
   three minutes are hidden from both the map and list, even when selected;
@@ -74,10 +76,11 @@ database.
 
 ## Run locally
 
-Requires Node 20 or newer. From the repository root:
+Requires Node 22.11 or newer (Node 22 LTS in CI and Docker). From the repository root:
 
 ```powershell
 cd server
+npm ci
 node index.js
 ```
 
@@ -88,14 +91,16 @@ location permission and a secure context (HTTPS or localhost); favorites are
 saved in that browser's local storage. See [server/README.md](server/README.md)
 for configuration, endpoints, tests and deployment (including Docker).
 
-Run the dependency-free checks with `node --test` (Node.js 22 or later) from
-the repository root and from `server/`.
+After installing the server dependencies, run `node --test` from the repository
+root. Browser checks run from `server/` with `npx playwright install chromium`
+and `npm run test:browser`; they use a local fake upstream and local Leaflet
+assets, not Boreal or external tile services.
 
 ## How live tracking works
 
-The server (`server/lib/tracker.js`) does all the scanning. It contacts
-Boreal only when a request arrives and its cached data has expired, so
-upstream traffic does not grow with the number of visitors:
+The server (`server/lib/tracker.js`) does the scanning. Startup warms live data;
+after that, requests trigger shared refreshes when data has expired. Outbound
+requests share a bounded queue and reserve capacity for interactive requests:
 
 1. Every ~3 minutes it fetches calls for all known stops and groups them by
    `journeyId`, storing each journey's ordered stop list with
@@ -108,13 +113,21 @@ upstream traffic does not grow with the number of visitors:
    destination and the next two stops ("Next stop" and "Then") with their
    expected times.
 
-The page polls `/api/buses` every 60 seconds and gets every bus ready to
+The page polls `/api/v1/buses` every 60 seconds and gets every bus ready to
 display in one request, including each bus's upcoming stops for the trip
 view. The town-wide `GetVehiclePositions` endpoint is not used: it returns no
 buses even while the per-call position endpoint works. Stop coordinates are
-resolved once by the server (`/api/stops`), because `GetStopAreas` returns
-Kiruna stops without locations. If Boreal becomes unreachable the server keeps
-serving the last known data, with the error reported in the response.
+resolved by the server because `GetStopAreas` returns Kiruna stops without
+locations. The page initially uses a validated bundled basic catalog, or a newer
+compatible IndexedDB copy, without waiting for a live scan. The catalog includes
+lines, located stops, and corrected route shapes, never live positions or
+departures. It is labeled with its capture time.
+
+Live responses report freshness and partial coverage separately from response
+creation time. Cold live requests return `503` with `Retry-After` rather than
+holding the page open for a scan. Expired positions disappear after three
+minutes even during an outage. Polling backs off on errors and pauses in hidden
+tabs. The original unversioned API remains temporarily for already-open pages.
 
 ## Hosting the page separately
 
@@ -131,10 +144,12 @@ src/                  Static web application
   css/app.css
   js/*.js             ES modules; no bundler
 server/               Node server: cached Boreal API client, /api, static hosting
+  data/bootstrap.json Validated basic-data snapshot included in the container
 docs/API.md           Endpoint and schema reference plus observed quirks
 docs/DATA_FLOW.md     Current runtime architecture and data flow
 docs/initial_plan.md  Historical design plan and implementation revisions
-openapi.yaml          Machine-readable API contract
+application.openapi.json Website API contract; schemas shared with validation
+openapi.yaml          Upstream Boreal API reference
 ```
 
 See [API documentation](docs/API.md) and

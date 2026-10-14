@@ -203,8 +203,8 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
     liveVehicles: [{ ...bus, position: { ...bus.position, location: overlapGps } }],
   });
   assert.notDeepEqual(visibleMarker.position, [overlapGps.lat, overlapGps.lon]);
-  const assertProjectionOnLane = () => {
-    const lane = sharedPaths[0].position[0].map((point) => map.project(point, map.zoom));
+  const assertProjectionOnLane = (polyline = sharedPaths[0]) => {
+    const lane = polyline.position[0].map((point) => map.project(point, map.zoom));
     for (const latLng of projections.at(-1).position.slice(0, -1)) {
       const point = map.project(latLng, map.zoom);
       const distance = Math.min(...lane.slice(1).map((to, i) => {
@@ -243,6 +243,19 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(sharedPaths[1].addCount, 2);
   assert.notDeepEqual(visibleMarker.position, [overlapGps.lat, overlapGps.lon]);
   assert.equal(routes.at(-1).options.dashArray, undefined);
+  const following = [
+    { id: 23, text: 'Second (23)', location: { lat: 67.87, lon: 20.24 } },
+    { id: 24, text: 'Third (24)', location: { lat: 67.875, lon: 20.245 } },
+    { id: 25, text: 'Fourth (25)', location: { lat: 67.879, lon: 20.249 } },
+  ];
+  store.set({
+    stopLocations: new Map([...store.get().stopLocations, ...following.map((stop) => [stop.id, stop])]),
+    journeyStops: new Map([[7, [bus.nextStop, ...following.map((stop) => ({ stopText: stop.text }))]]]),
+  });
+  assert.deepEqual(projections.at(-1).position.at(-1), [following[1].location.lat, following[1].location.lon]);
+  assertProjectionOnLane(routes.at(-1));
+  store.set({ journeyStops: new Map([[7, [bus.nextStop, { stopText: following[0].text }]]]) });
+  assert.deepEqual(projections.at(-1).position.at(-1), [following[0].location.lat, following[0].location.lon]);
   const lastProjection = projections.at(-1);
   store.set({ selectedVehicleJourneyId: null, hoveredVehicleJourneyId: 7 });
   assert.equal(projections.at(-1), lastProjection); // hover survives deselection

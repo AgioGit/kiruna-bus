@@ -448,8 +448,7 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       Number.isFinite(Date.parse(res.value.timestamp)));
     if (unavailable.size) rescanRequested = true;
     positionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.'
-      : positionCoverage.failed ? 'Some bus positions could not be refreshed.'
-        : positionCoverage.expired ? 'Some bus position fixes are older than three minutes.' : null;
+      : positionCoverage.failed ? 'Some bus positions could not be refreshed.' : null;
     if (!positionCoverage.failed) lastSuccessfulPositions = new Date(now()).toISOString();
   }
 

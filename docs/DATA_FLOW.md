@@ -100,7 +100,10 @@ responses remain usable during normal 60-second browser polling. Position
 collection age becomes stale after three minutes, and scan age after the
 two-interval retention window. GPS expiry is evaluated at response time, even
 while a refresh is still running, so genuinely expired fixes are still hidden
-and reported immediately.
+and reported immediately. Expiry remains in quality metadata, not the
+position-fetch error. The browser explains how many outdated position reports
+were hidden instead of showing a generic stale warning for GPS expiry alone.
+Other freshness and refresh failures still show their warnings.
 
 ## Browser state and polling
 

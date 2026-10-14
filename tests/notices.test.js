@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { showNotice } from '../src/js/notices.js';
+import { store } from '../src/js/appState.js';
+import { initUi } from '../src/js/ui.js';
 
 function element() {
   const classes = new Set();
@@ -52,4 +54,63 @@ test('ongoing failures remain visible past the transient timeout', (t) => {
   assert.equal(notice.hidden, false);
   assert.equal(notice.classList.contains('notice-fading'), false);
   assert.equal(notice.textContent, 'Live tracking is unavailable');
+});
+
+test('expired position notices explain hidden reports without implying displayed buses are stale', () => {
+  const originalDocument = globalThis.document;
+  const originalState = store.get();
+  const children = new Set();
+  const banner = {
+    hidden: true,
+    appendChild(child) { children.delete(child); children.add(child); },
+  };
+  globalThis.document = {
+    getElementById: (id) => id === 'status-banner' ? banner : null,
+    createElement: () => {
+      const child = element();
+      child.remove = () => children.delete(child);
+      return child;
+    },
+  };
+  const messages = () => [...children].filter((child) => !child.hidden).map((child) => child.textContent);
+  const quality = { state: 'stale', reasons: ['GPS_OLD'], positions: { expired: 1 }, scan: { failed: 0 } };
+  try {
+    store.set({ catalogInfo: null, liveQuality: quality });
+    initUi();
+    assert.deepEqual(messages(), [
+      'Live data: 1 outdated position report is hidden (older than 3 minutes).',
+    ]);
+
+    store.set({ liveQuality: { ...quality, positions: { expired: 2 } } });
+    assert.deepEqual(messages(), [
+      'Live data: 2 outdated position reports are hidden (older than 3 minutes).',
+    ]);
+
+    store.set({
+      errors: { ...originalState.errors, vehicles: 'Some bus positions could not be refreshed.' },
+      liveQuality: { ...quality, reasons: ['POSITION_FAILURE', 'GPS_OLD'] },
+    });
+    assert.deepEqual(messages(), [
+      'vehicles: Some bus positions could not be refreshed.',
+      'Live data: stale. 1 outdated position report is hidden (older than 3 minutes).',
+    ]);
+
+    store.set({
+      errors: originalState.errors,
+      liveQuality: { ...quality, reasons: ['PARTIAL_SCAN', 'GPS_OLD'], scan: { failed: 2 } },
+    });
+    assert.deepEqual(messages(), [
+      'Live data: stale (2 stops failed to refresh). 1 outdated position report is hidden (older than 3 minutes).',
+    ]);
+
+    store.set({ liveQuality: { ...quality, reasons: ['POSITIONS_OLD'], positions: { expired: 0 } } });
+    assert.deepEqual(messages(), ['Live data: stale.']);
+
+    store.set({ liveQuality: { ...quality, state: 'fresh', reasons: [], positions: { expired: 0 } } });
+    assert.deepEqual(messages(), []);
+    assert.equal(banner.hidden, true);
+  } finally {
+    store.set(originalState);
+    globalThis.document = originalDocument;
+  }
 });

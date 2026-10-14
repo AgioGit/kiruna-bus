@@ -56,7 +56,7 @@ test('ongoing failures remain visible past the transient timeout', (t) => {
   assert.equal(notice.textContent, 'Live tracking is unavailable');
 });
 
-test('expired position notices explain hidden reports without implying displayed buses are stale', () => {
+test('routine GPS expiry stays quiet without suppressing refresh failures', () => {
   const originalDocument = globalThis.document;
   const originalState = store.get();
   const children = new Set();
@@ -77,14 +77,12 @@ test('expired position notices explain hidden reports without implying displayed
   try {
     store.set({ catalogInfo: null, liveQuality: quality });
     initUi();
-    assert.deepEqual(messages(), [
-      'Live data: 1 outdated position report is hidden (older than 3 minutes).',
-    ]);
+    assert.deepEqual(messages(), []);
+    assert.equal(banner.hidden, true);
 
     store.set({ liveQuality: { ...quality, positions: { expired: 2 } } });
-    assert.deepEqual(messages(), [
-      'Live data: 2 outdated position reports are hidden (older than 3 minutes).',
-    ]);
+    assert.deepEqual(messages(), []);
+    assert.equal(banner.hidden, true);
 
     store.set({
       errors: { ...originalState.errors, vehicles: 'Some bus positions could not be refreshed.' },
@@ -92,7 +90,7 @@ test('expired position notices explain hidden reports without implying displayed
     });
     assert.deepEqual(messages(), [
       'vehicles: Some bus positions could not be refreshed.',
-      'Live data: stale. 1 outdated position report is hidden (older than 3 minutes).',
+      'Live data: stale.',
     ]);
 
     store.set({
@@ -100,8 +98,14 @@ test('expired position notices explain hidden reports without implying displayed
       liveQuality: { ...quality, reasons: ['PARTIAL_SCAN', 'GPS_OLD'], scan: { failed: 2 } },
     });
     assert.deepEqual(messages(), [
-      'Live data: stale (2 stops failed to refresh). 1 outdated position report is hidden (older than 3 minutes).',
+      'Live data: stale (2 stops failed to refresh).',
     ]);
+
+    store.set({ liveQuality: { ...quality, state: 'unavailable' } });
+    assert.deepEqual(messages(), ['Live data: unavailable.']);
+
+    store.set({ liveQuality: { ...quality, reasons: [] } });
+    assert.deepEqual(messages(), ['Live data: stale.']);
 
     store.set({ liveQuality: { ...quality, reasons: ['POSITIONS_OLD'], positions: { expired: 0 } } });
     assert.deepEqual(messages(), ['Live data: stale.']);

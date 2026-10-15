@@ -114,6 +114,20 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   const stopRenders = stopLayer.clearCount;
   const originalRoute = routes[0];
   const marker = markers[0];
+  assert.deepEqual(marker.icon.iconSize, [30, 30]);
+  assert.deepEqual(marker.icon.iconAnchor, [15, 15]);
+  assert.match(marker.icon.html, /class="vehicle-bus"/);
+  assert.match(marker.icon.html, /--vehicle-color: #555555/);
+  for (const heading of [0, 90, 180, 270]) {
+    store.set({ liveVehicles: [{ ...bus, position: { ...bus.position, heading } }] });
+    assert.equal(markers.length, 1);
+    assert.match(marker.icon.html, new RegExp(`class="vehicle-heading" style="transform: rotate\\(${heading}deg\\);"`));
+  }
+  store.set({ liveVehicles: [{ ...bus, position: { ...bus.position, heading: null } }] });
+  assert.match(marker.icon.html, /class="vehicle-heading" style="transform: rotate\([\d.]+deg\);"/);
+  store.set({ liveVehicles: [{ ...bus, routeId: null, position: { ...bus.position, heading: null } }] });
+  assert.match(marker.icon.html, /class="vehicle-bus"/);
+  assert.doesNotMatch(marker.icon.html, /vehicle-heading|vehicle-direction/);
   store.set({ liveVehicles: [{ ...bus, position: { ...bus.position, location: { lat: 67.851, lon: 20.221 } } }] });
 
   assert.equal(markers.length, 1);
@@ -198,6 +212,7 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.deepEqual(sharedPaths[0].position[0].at(-1), sharedPaths[1].position[0].at(-1));
 
   const visibleMarker = markers.at(-1);
+  assert.match(visibleMarker.icon.html, /--vehicle-color: #f9a825;/);
   const overlapGps = { lat: 67.865, lon: 20.235 };
   store.set({
     liveVehicles: [{ ...bus, position: { ...bus.position, location: overlapGps } }],

@@ -18,9 +18,12 @@ at the server boundary. There is no application build step or database.
 - The API's LKAB-bound red route currently misses Skrädaregatan; only its
   Adolf Hedinsvägen–LKAB map segment uses the reverse of the API's return
   route. Stop times and the rest of the route are unchanged.
-- Directional vehicle arrows using each reported heading, falling back to
-  the nearest route segment oriented toward the next stop when heading is
-  unavailable.
+- Upright bus symbols inside route-colored circles, with a small arrow on
+  the circle's edge showing direction. Bus symbols are white in light mode
+  and black in dark mode; circles keep their route colors. Arrows use each
+  reported heading, falling back to the nearest route segment oriented toward
+  the next stop.
+  When neither is available, the bus remains visible without an arrow.
 - Live bus cards are grouped by line color in a stable order rather than
   reshuffling by ETA. They show line, destination, next stop, expected time,
   planned time when it differs, last update, and position freshness. Buses

@@ -139,10 +139,12 @@ export function createApplication({
       bucket = { at: time, count: 0 };
       clients.set(address, bucket);
     }
-    if (++globalBucket.count > settings.globalRequestsPerMinute || ++bucket.count > settings.clientRequestsPerMinute) {
+    if (bucket.count >= settings.clientRequestsPerMinute || globalBucket.count >= settings.globalRequestsPerMinute) {
       telemetry.count('rateLimited');
       throw new AppError('RATE_LIMITED', 'Too many requests. Try again shortly.', { status: 429, retryAfter: 60 });
     }
+    bucket.count++;
+    globalBucket.count++;
   }
   const server = http.createServer({ requestTimeout: 15000, headersTimeout: 10000, keepAliveTimeout: 5000 }, async (req, res) => {
     const started = performance.now();

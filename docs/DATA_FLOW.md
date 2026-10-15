@@ -1,6 +1,6 @@
 # Current data flow
 
-The application is served by one scale-to-zero Node container. The browser uses
+The application is served by one scale-to-zero-capable Node container. The browser uses
 the versioned application API, not Boreal's protocol. See
 [the application contract](../application.openapi.json) and
 [server operations](../server/README.md). `openapi.yaml` and `API.md` describe

@@ -1,6 +1,6 @@
 # Backend and client communication implementation plan
 
-Status: all seven phases implemented and locally verified; not deployed.
+Status: all seven phases implemented and locally verified; deployment is manual.
 
 Baseline working branch: `mhedqvist-backend-production-readiness`.
 
@@ -35,6 +35,12 @@ See [current data flow](DATA_FLOW.md) and
 The original verification counts below are historical, not the verification
 record for this amendment. Production ingress buffering, connection timeouts,
 provider traffic budgets, and idle scale-down still require release checks.
+
+Deployment decision (2026-10-15): preserve the existing Azure minimum of one
+replica and maximum of one for this rollout, as explicitly requested by the
+user. The collector still becomes idle; platform scale-to-zero is supported
+but is not enabled with that setting. This overrides the original minimum-zero
+hosting choice for the current deployment only.
 
 Local verification of this amendment completed:
 

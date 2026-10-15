@@ -319,12 +319,17 @@ test('a slow reader is dropped by its deadline without delaying an active reader
 
   const active = await openStream(base);
   const activeReader = sseReader(active.res);
-  await activeReader.next(); // drain the initial frame
+  await drainSettled(activeReader, 20);
 
-  await collector.forceDynamicCycle();
-
-  const updated = await activeReader.next(1000);
-  assert.equal(updated.event, 'buses');
+  // Socket buffer sizes differ by OS. Fill the unread transport while
+  // consuming every active-reader frame, rather than assuming 300 KiB blocks.
+  for (let revision = 1; revision <= 100 && !sockets[0].destroyed; revision++) {
+    trackerState.revision = revision;
+    await collector.forceDynamicCycle();
+    const updated = await activeReader.next(1000);
+    assert.equal(updated.event, 'buses');
+    assert.equal(updated.id, `${collector.epoch}:${revision}`);
+  }
 
   const deadline = Date.now() + 2000;
   let connections = null;

@@ -12,7 +12,7 @@ Prerequisite: complete and release the
 
 This document covers improvements to consider after the first production-ready
 release. It does not move required work out of that plan or change the agreed
-architecture: one scale-to-zero container, bundled basic information plus browser
+architecture: one scale-to-zero-capable container, bundled basic information plus browser
 cache, native Node HTTP, and three-minute position expiry. The approved SSE
 amendment replaces the original 60-second polling design only.
 

@@ -245,8 +245,11 @@ requires unit/HTTP and browser checks plus a smoke test of the exact built
 image with Boreal unavailable. The runtime image installs locked production
 dependencies only and runs as the non-root `node` user.
 
-For the documented Azure Container Apps deployment, keep minimum replicas `0`,
-maximum `1`, target port `8080`, and HTTP ingress/probes configured for
+For the current Azure Container Apps rollout, preserve minimum replicas `1`
+and maximum `1`, as explicitly requested for this deployment. The collector
+still idles without live clients, but hosting will not scale to zero with this
+setting. Enabling scale-to-zero later requires minimum replicas `0`.
+Keep target port `8080` and HTTP ingress/probes configured for
 `/api/ready` and `/api/live` on port `8080`. Allow startup time for the container,
 not an entire Boreal scan. Use HTTPS ingress.
 

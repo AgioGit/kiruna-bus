@@ -247,6 +247,76 @@ test('map-library failures share the inline notice area with live status', async
   await expect(page.locator('.header-updates #status-banner')).toContainText('Cached basic map information');
 });
 
+test('bus circles retain line colors while only their edge direction indicators rotate', async ({ page, request }) => {
+  await request.post('/__test/mode/live');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  await expect(page.locator('.vehicle-marker')).toHaveCount(1);
+  await page.evaluate(async () => {
+    (await import('/js/poller.js')).pausePolling();
+    const { store } = await import('/js/appState.js');
+    const bus = store.get().liveVehicles[0];
+    const lines = ['Gr\u00f6n', 'Gul', 'Lila', 'R\u00f6d'].map((text, index) => ({ id: index + 1, text }));
+    store.set({
+      lines, activeLineIds: new Set(lines.map((line) => line.id)),
+      lineRoutes: new Map(), routeGeometry: new Map(),
+      liveVehicles: lines.map((line, index) => ({
+        ...bus, journeyId: 1001 + index, lineId: line.id, line: line.text, routeId: null,
+        position: {
+          ...bus.position, heading: index * 90,
+          location: { lat: bus.position.location.lat + index * 0.001, lon: bus.position.location.lon },
+        },
+      })),
+    });
+  });
+  const markers = page.locator('.vehicle-marker');
+  await expect(markers).toHaveCount(4);
+  const colors = ['rgb(46, 125, 50)', 'rgb(249, 168, 37)', 'rgb(123, 31, 162)', 'rgb(198, 40, 40)'];
+  const rotations = ['matrix(1, 0, 0, 1, 0, 0)', 'matrix(0, 1, -1, 0, 0, 0)',
+    'matrix(-1, 0, 0, -1, 0, 0)', 'matrix(0, -1, 1, 0, 0, 0)'];
+  for (let i = 0; i < colors.length; i++) {
+    const marker = markers.nth(i);
+    await expect(marker).toHaveCSS('background-color', colors[i]);
+    await expect(marker).toHaveCSS('border-radius', '50%');
+    await expect(marker).toHaveCSS('width', '30px');
+    await expect(marker.locator('.vehicle-bus')).toHaveCSS('color', 'rgb(255, 255, 255)');
+    await expect(marker.locator('.vehicle-bus')).toHaveCSS('transform', 'none');
+    await expect(marker.locator('.vehicle-heading')).toHaveCSS('transform', rotations[i]);
+    await expect(marker.locator('.vehicle-direction')).toHaveCSS('fill', colors[i]);
+    const offset = await marker.evaluate((element) => {
+      const circle = element.getBoundingClientRect();
+      const arrow = element.querySelector('.vehicle-direction').getBoundingClientRect();
+      return { x: arrow.x + arrow.width / 2 - circle.x - circle.width / 2,
+        y: arrow.y + arrow.height / 2 - circle.y - circle.height / 2 };
+    });
+    expect(offset.x).toBeCloseTo([0, 16, 0, -16][i], 0);
+    expect(offset.y).toBeCloseTo([-16, 0, 16, 0][i], 0);
+  }
+  await page.locator('#theme-toggle').click();
+  for (let i = 0; i < colors.length; i++) {
+    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(0, 0, 0)');
+    await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+    await expect(markers.nth(i).locator('.vehicle-direction')).toHaveCSS('fill', colors[i]);
+  }
+  await page.locator('#theme-toggle').click();
+  for (let i = 0; i < colors.length; i++) {
+    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(255, 255, 255)');
+    await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+  }
+  await page.evaluate(async () => {
+    const { store } = await import('/js/appState.js');
+    store.set({ liveVehicles: store.get().liveVehicles.map((bus) => ({
+      ...bus, position: { ...bus.position, heading: null },
+    })) });
+  });
+  await expect(page.locator('.vehicle-direction')).toHaveCount(0);
+  await expect(page.locator('.vehicle-bus')).toHaveCount(4);
+  for (let i = 0; i < colors.length; i++) await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+  await markers.first().click();
+  await expect(page.locator('.vehicle-icon-wrapper--selected')).toHaveCount(1);
+  await expect(markers.first()).toHaveCSS('transform', 'matrix(1.2, 0, 0, 1.2, 0, 0)');
+});
+
 test('stale bus cards fade like their markers and recover when positions refresh', async ({ page, request }) => {
   await request.post('/__test/mode/live');
   await page.goto('/');
@@ -261,7 +331,7 @@ test('stale bus cards fade like their markers and recover when positions refresh
       position: { ...bus.position, timestamp: new Date(Date.now() - 120000).toISOString() },
     })) });
   });
-  const staleMarker = page.locator('.vehicle-arrow--stale, .vehicle-dot--stale');
+  const staleMarker = page.locator('.vehicle-marker--stale');
   await expect(staleMarker).toHaveCount(1);
   await expect(staleMarker).toHaveCSS('opacity', '0.45');
   await expect(card).toHaveCSS('opacity', '0.45');

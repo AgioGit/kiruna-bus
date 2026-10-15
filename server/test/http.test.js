@@ -114,6 +114,38 @@ test('rate limits are explicit and probes remain accessible', async (t) => {
   assert.equal((await fetch(`${base}/api/live`)).status, 200);
 });
 
+test('client-rejected requests preserve the global quota and limits reset at one minute', async (t) => {
+  let time = Date.parse('2026-01-01T12:00:00Z');
+  const { base } = await serve(t, {
+    settings: { trustProxy: true, clientRequestsPerMinute: 1, globalRequestsPerMinute: 3 },
+    now: () => time,
+  });
+  const request = async (address, status) => {
+    const response = await fetch(`${base}/api/v1/search?q=station`, {
+      headers: { 'x-forwarded-for': address },
+    });
+    assert.equal(response.status, status);
+    if (status === 429) {
+      assert.equal(response.headers.get('retry-after'), '60');
+      assert.equal(validate('error', await response.json()).error.code, 'RATE_LIMITED');
+    } else await response.json();
+  };
+
+  await request('192.0.2.1', 200);
+  for (let i = 0; i < 5; i++) await request('192.0.2.1', 429);
+  await request('192.0.2.2', 200);
+  await request('192.0.2.3', 200);
+  await request('192.0.2.4', 429);
+
+  time += 59999;
+  await request('192.0.2.4', 429);
+  time++;
+  await request('192.0.2.1', 200);
+  await request('192.0.2.2', 200);
+  await request('192.0.2.3', 200);
+  await request('192.0.2.4', 429);
+});
+
 test('configuration rejects invalid input instead of silently using defaults', () => {
   for (const env of [
     { PORT: 'oops' }, { PORT: '-1' }, { UPSTREAM_TIMEOUT_MS: '0' }, { BOREAL_BASE: 'file:///tmp' },

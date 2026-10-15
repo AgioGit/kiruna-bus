@@ -793,13 +793,6 @@ button.vehicle-card {
   font-weight: 600;
 }
 
-/* Directional vehicle marker: a CSS triangle pointing north (0deg) by
-   default, rotated via an inline transform on the INNER element (see
-   map.js) to match VehiclePosition.heading. Scale/glow for the selected
-   state live on the OUTER wrapper instead of the rotated element, since an
-   inline `transform: rotate(...)` would otherwise fully override any
-   `transform: scale(...)` set by a CSS class on the same element
-   (inline styles beat stylesheet rules regardless of specificity). */
 .vehicle-icon-wrapper {
   background: none;
   border: none;
@@ -808,24 +801,21 @@ button.vehicle-card {
   justify-content: center;
   width: 100%;
   height: 100%;
-  transition: transform 0.15s ease;
 }
 
-.vehicle-icon-wrapper--selected {
-  transform: scale(1.35);
+.vehicle-icon-wrapper--selected .vehicle-marker {
+  transform: scale(1.2);
   filter: drop-shadow(0 0 5px var(--color-info)) drop-shadow(0 0 2px var(--color-info));
 }
 
-/* Hover ring: drawn on a pseudo-element so it doesn't fight the rotated
-   marker's inline transform. */
 .vehicle-icon-wrapper--hover::before {
   content: '';
   z-index: -1;
   position: absolute;
   top: -6px;
   left: -6px;
-  width: 30px;
-  height: 30px;
+  width: 42px;
+  height: 42px;
   border: 3px solid #f59e0b;
   border-radius: 50%;
   background: rgba(245, 158, 11, 0.25);
@@ -833,32 +823,52 @@ button.vehicle-card {
   pointer-events: none;
 }
 
-.vehicle-arrow {
-  width: 0;
-  height: 0;
-  border-left: 9px solid transparent;
-  border-right: 9px solid transparent;
-  border-bottom: 18px solid #555555; /* overridden inline per-marker color */
-  /* White outline (four hard offset shadows) plus a soft dark shadow so the
-     arrow stands out from same-colored route lines in both themes. */
-  filter: drop-shadow(1.5px 0 0 #fff) drop-shadow(-1.5px 0 0 #fff)
-    drop-shadow(0 1.5px 0 #fff) drop-shadow(0 -1.5px 0 #fff)
-    drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
-  transform-origin: 50% 60%;
+.vehicle-marker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: var(--vehicle-color);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.6);
+  transition: transform 0.15s ease;
+}
+
+:root[data-theme="dark"] .vehicle-marker {
+  color: #000;
+}
+
+.vehicle-bus {
+  width: 22px;
+  height: 22px;
+}
+
+/* Rotate only the edge indicator; the bus stays upright. */
+.vehicle-heading {
+  position: absolute;
+  inset: -2px;
+  pointer-events: none;
+}
+
+.vehicle-direction {
+  position: absolute;
+  top: -6px;
+  left: 9px;
+  width: 12px;
+  height: 10px;
+  fill: var(--vehicle-color);
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
 }
 
 .vehicle-card--stale,
-.vehicle-arrow--stale,
-.vehicle-dot--stale {
+.vehicle-marker--stale {
   opacity: 0.45;
-}
-
-.vehicle-dot {
-  width: 16px;
-  height: 16px;
-  border: 3px solid #ffffff;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.6);
 }
 
 .vehicle-next-stop-path {
@@ -871,7 +881,8 @@ button.vehicle-card {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .notice {
+  .notice,
+  .vehicle-marker {
     transition: none;
   }
 

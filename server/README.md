@@ -140,8 +140,10 @@ stops new API work and aborts owned upstream jobs, with a five-second drain
 deadline.
 
 Concurrent streams have global and per-client limits in addition to HTTP
-request-rate limits. Slow readers may retain only the latest pending snapshot;
-bounded pending bytes and a drain deadline prevent unbounded buffering.
+request-rate limits. Requests rejected by either request-rate limit do not
+consume request quota, so a blocked client cannot exhaust other clients'
+remaining global allowance. Slow readers may retain only the latest pending
+snapshot; bounded pending bytes and a drain deadline prevent unbounded buffering.
 Disconnect and shutdown remove listeners and timers. `/api/status` reports
 collector activity, cycle timing, and stream health without user-specific
 metric labels. Use the same explicitly trusted ingress/IP policy for both

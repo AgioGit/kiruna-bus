@@ -2,7 +2,7 @@
 // oriented toward the journey's next stop. MapRoute geometry is not reliably
 // ordered in travel direction, so the next stop determines whether the nearest
 // segment should be followed forwards or backwards. Without all three inputs,
-// a direction cannot be inferred safely and the caller should render a dot.
+// a direction cannot be inferred safely and the caller should omit the arrow.
 export function headingAlongRoute(position, geometry, nextStopLocation) {
   const locations = geometry?.locations;
   if (

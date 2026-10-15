@@ -302,8 +302,8 @@ function renderVehicles(state) {
       ? Number(reportedHeading)
       : headingAlongRoute(bus.position.location, state.routeGeometry.get(bus.routeId), nextStopLocation);
 
-    const markerClasses = [heading == null ? 'vehicle-dot' : 'vehicle-arrow'];
-    if (bus.stale) markerClasses.push(heading == null ? 'vehicle-dot--stale' : 'vehicle-arrow--stale');
+    const markerClasses = ['vehicle-marker'];
+    if (bus.stale) markerClasses.push('vehicle-marker--stale');
     const wrapperClasses = ['vehicle-icon-wrapper'];
     if (isSelected) wrapperClasses.push('vehicle-icon-wrapper--selected');
     const isHovered = bus.journeyId != null && bus.journeyId === state.hoveredVehicleJourneyId;
@@ -335,17 +335,15 @@ function renderVehicles(state) {
         }
       }
     }
-    const markerStyle = heading == null
-      ? `background-color: ${color};`
-      : `transform: rotate(${heading}deg); border-bottom-color: ${color};`;
-    const iconKey = `${wrapperClasses.join(' ')}|${markerClasses.join(' ')}|${markerStyle}`;
+    const markerStyle = `--vehicle-color: ${color};`;
+    const iconKey = `${wrapperClasses.join(' ')}|${markerClasses.join(' ')}|${markerStyle}|${heading}`;
     const nameLabel =
       bus.lineId !== undefined ? `${shortLineLabel(bus, state)} → ${bus.destination}` : `Bus (call ${bus.callIds[0]})`;
     const nextStopLabel = bus.nextStop?.stopText ? ` | next: ${bus.nextStop.stopText}` : '';
     const label = bus.stale ? `${nameLabel}${nextStopLabel} (stale, ${formatAge(bus.ageMs)} ago)` : `${nameLabel}${nextStopLabel}`;
     let entry = vehicleMarkers.get(key);
     if (!entry) {
-      const marker = L.marker(displayPosition, { icon: vehicleIcon(wrapperClasses, markerClasses, markerStyle) });
+      const marker = L.marker(displayPosition, { icon: vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading) });
       marker.bindTooltip(textTooltip(label), { direction: 'top' });
       if (bus.journeyId != null) marker.on('click', () => selectVehicle(bus.journeyId));
       marker.addTo(vehicleLayer);
@@ -354,7 +352,7 @@ function renderVehicles(state) {
     } else {
       entry.marker.setLatLng(displayPosition);
       if (entry.iconKey !== iconKey) {
-        entry.marker.setIcon(vehicleIcon(wrapperClasses, markerClasses, markerStyle));
+        entry.marker.setIcon(vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading));
         entry.iconKey = iconKey;
       }
       if (entry.label !== label) {
@@ -396,12 +394,28 @@ function renderVehicles(state) {
   }
 }
 
-function vehicleIcon(wrapperClasses, markerClasses, markerStyle) {
+function vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading) {
+  const direction = heading == null ? '' : `
+    <span class="vehicle-heading" style="transform: rotate(${heading}deg);" aria-hidden="true">
+      <svg class="vehicle-direction" viewBox="0 0 12 10" focusable="false">
+        <path d="M6 1 11 9 6 7 1 9Z" />
+      </svg>
+    </span>`;
   return L.divIcon({
     className: wrapperClasses.join(' '),
-    html: `<div class="${markerClasses.join(' ')}" style="${markerStyle}"></div>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
+    html: `<div class="${markerClasses.join(' ')}" style="${markerStyle}">
+      <svg class="vehicle-bus" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M7 3h10a3 3 0 0 1 3 3v12a2 2 0 0 1-2 2v1h-3v-1H9v1H6v-1a2 2 0 0 1-2-2V6a3 3 0 0 1 3-3Z" />
+        <g fill="var(--vehicle-color)">
+          <rect x="8" y="4.5" width="8" height="1.5" rx=".75" />
+          <rect x="6" y="7.5" width="12" height="6" rx="1" />
+          <circle cx="7.5" cy="16.5" r="1.25" />
+          <circle cx="16.5" cy="16.5" r="1.25" />
+        </g>
+      </svg>${direction}
+    </div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
   });
 }
 

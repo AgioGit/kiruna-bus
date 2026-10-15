@@ -117,6 +117,7 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.deepEqual(marker.icon.iconSize, [30, 30]);
   assert.deepEqual(marker.icon.iconAnchor, [15, 15]);
   assert.match(marker.icon.html, /class="vehicle-bus"/);
+  assert.match(marker.icon.html, /<g fill="var\(--color-surface\)">/);
   assert.match(marker.icon.html, /--vehicle-color: #555555/);
   for (const heading of [0, 90, 180, 270]) {
     store.set({ liveVehicles: [{ ...bus, position: { ...bus.position, heading } }] });

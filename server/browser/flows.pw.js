@@ -247,7 +247,7 @@ test('map-library failures share the inline notice area with live status', async
   await expect(page.locator('.header-updates #status-banner')).toContainText('Cached basic map information');
 });
 
-test('bus circles retain line colors while only their edge direction indicators rotate', async ({ page, request }) => {
+test('high-contrast bus symbols use route-colored rings while only edge indicators rotate', async ({ page, request }) => {
   await request.post('/__test/mode/live');
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('/');
@@ -271,15 +271,21 @@ test('bus circles retain line colors while only their edge direction indicators 
   });
   const markers = page.locator('.vehicle-marker');
   await expect(markers).toHaveCount(4);
+  const panel = page.locator('#live-buses');
+  const lightSurface = await panel.evaluate((element) => getComputedStyle(element).backgroundColor);
   const colors = ['rgb(46, 125, 50)', 'rgb(249, 168, 37)', 'rgb(123, 31, 162)', 'rgb(198, 40, 40)'];
   const rotations = ['matrix(1, 0, 0, 1, 0, 0)', 'matrix(0, 1, -1, 0, 0, 0)',
     'matrix(-1, 0, 0, -1, 0, 0)', 'matrix(0, -1, 1, 0, 0, 0)'];
   for (let i = 0; i < colors.length; i++) {
     const marker = markers.nth(i);
-    await expect(marker).toHaveCSS('background-color', colors[i]);
+    await expect(marker).toHaveCSS('background-color', lightSurface);
+    await expect(marker).toHaveCSS('border-color', colors[i]);
+    await expect(marker).toHaveCSS('border-width', '3px');
     await expect(marker).toHaveCSS('border-radius', '50%');
     await expect(marker).toHaveCSS('width', '30px');
-    await expect(marker.locator('.vehicle-bus')).toHaveCSS('color', 'rgb(255, 255, 255)');
+    await expect(marker.locator('.vehicle-bus')).toHaveCSS('color', 'rgb(26, 26, 26)');
+    await expect(marker.locator('.vehicle-bus > path')).toHaveCSS('fill', 'rgb(26, 26, 26)');
+    await expect(marker.locator('.vehicle-bus rect').first()).toHaveCSS('fill', lightSurface);
     await expect(marker.locator('.vehicle-bus')).toHaveCSS('transform', 'none');
     await expect(marker.locator('.vehicle-heading')).toHaveCSS('transform', rotations[i]);
     await expect(marker.locator('.vehicle-direction')).toHaveCSS('fill', colors[i]);
@@ -293,15 +299,22 @@ test('bus circles retain line colors while only their edge direction indicators 
     expect(offset.y).toBeCloseTo([-16, 0, 16, 0][i], 0);
   }
   await page.locator('#theme-toggle').click();
+  const darkSurface = await panel.evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(darkSurface).not.toBe(lightSurface);
   for (let i = 0; i < colors.length; i++) {
-    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(0, 0, 0)');
-    await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(255, 255, 255)');
+    await expect(markers.nth(i).locator('.vehicle-bus > path')).toHaveCSS('fill', 'rgb(255, 255, 255)');
+    await expect(markers.nth(i).locator('.vehicle-bus rect').first()).toHaveCSS('fill', darkSurface);
+    await expect(markers.nth(i)).toHaveCSS('background-color', darkSurface);
+    await expect(markers.nth(i)).toHaveCSS('border-color', colors[i]);
     await expect(markers.nth(i).locator('.vehicle-direction')).toHaveCSS('fill', colors[i]);
   }
   await page.locator('#theme-toggle').click();
   for (let i = 0; i < colors.length; i++) {
-    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(255, 255, 255)');
-    await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+    await expect(markers.nth(i).locator('.vehicle-bus')).toHaveCSS('color', 'rgb(26, 26, 26)');
+    await expect(markers.nth(i).locator('.vehicle-bus rect').first()).toHaveCSS('fill', lightSurface);
+    await expect(markers.nth(i)).toHaveCSS('background-color', lightSurface);
+    await expect(markers.nth(i)).toHaveCSS('border-color', colors[i]);
   }
   await page.evaluate(async () => {
     const { store } = await import('/js/appState.js');
@@ -311,10 +324,62 @@ test('bus circles retain line colors while only their edge direction indicators 
   });
   await expect(page.locator('.vehicle-direction')).toHaveCount(0);
   await expect(page.locator('.vehicle-bus')).toHaveCount(4);
-  for (let i = 0; i < colors.length; i++) await expect(markers.nth(i)).toHaveCSS('background-color', colors[i]);
+  for (let i = 0; i < colors.length; i++) await expect(markers.nth(i)).toHaveCSS('background-color', lightSurface);
   await markers.first().click();
   await expect(page.locator('.vehicle-icon-wrapper--selected')).toHaveCount(1);
   await expect(markers.first()).toHaveCSS('transform', 'matrix(1.2, 0, 0, 1.2, 0, 0)');
+});
+
+test('hover highlights remain centered while selecting, moving and zooming bus markers', async ({ page, request }) => {
+  await request.post('/__test/mode/live');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  const card = page.locator('#live-buses button[data-journey-id="101"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(async () => (await import('/js/poller.js')).pausePolling());
+  const wrapper = page.locator('.vehicle-icon-wrapper');
+  const expectCenteredHighlight = async () => {
+    await expect(wrapper).toHaveClass(/vehicle-icon-wrapper--hover/);
+    const geometry = await wrapper.evaluate((element) => {
+      const halo = getComputedStyle(element, '::before');
+      const contentBox = halo.boxSizing === 'content-box';
+      const width = parseFloat(halo.width) + (contentBox
+        ? parseFloat(halo.borderLeftWidth) + parseFloat(halo.borderRightWidth) : 0);
+      const height = parseFloat(halo.height) + (contentBox
+        ? parseFloat(halo.borderTopWidth) + parseFloat(halo.borderBottomWidth) : 0);
+      const bounds = element.getBoundingClientRect();
+      const bus = element.querySelector('.vehicle-marker').getBoundingClientRect();
+      return {
+        width, height,
+        offsetX: bounds.x + parseFloat(halo.left) + width / 2 - bus.x - bus.width / 2,
+        offsetY: bounds.y + parseFloat(halo.top) + height / 2 - bus.y - bus.height / 2,
+      };
+    });
+    expect(geometry.offsetX).toBeCloseTo(0, 3);
+    expect(geometry.offsetY).toBeCloseTo(0, 3);
+    expect(geometry.width).toBe(42);
+    expect(geometry.height).toBe(42);
+  };
+
+  await card.hover();
+  await expectCenteredHighlight();
+  await card.click();
+  await expect(wrapper).toHaveClass(/vehicle-icon-wrapper--selected/);
+  await expectCenteredHighlight();
+  await page.evaluate(async () => {
+    const { store } = await import('/js/appState.js');
+    store.set({ liveVehicles: store.get().liveVehicles.map((bus) => ({
+      ...bus, position: { ...bus.position, heading: 180,
+        location: { lat: bus.position.location.lat + 0.0004, lon: bus.position.location.lon + 0.0004 } },
+    })) });
+  });
+  await expectCenteredHighlight();
+  await page.locator('.leaflet-control-zoom-in').click();
+  await card.hover();
+  await expectCenteredHighlight();
+  await page.locator('#theme-toggle').click();
+  await card.hover();
+  await expectCenteredHighlight();
 });
 
 test('stale bus cards fade like their markers and recover when positions refresh', async ({ page, request }) => {

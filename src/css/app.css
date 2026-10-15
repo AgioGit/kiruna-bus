@@ -812,10 +812,7 @@ button.vehicle-card {
   content: '';
   z-index: -1;
   position: absolute;
-  top: -6px;
-  left: -6px;
-  width: 42px;
-  height: 42px;
+  inset: -6px;
   border: 3px solid #f59e0b;
   border-radius: 50%;
   background: rgba(245, 158, 11, 0.25);
@@ -830,16 +827,16 @@ button.vehicle-card {
   justify-content: center;
   width: 30px;
   height: 30px;
-  border: 2px solid #fff;
+  border: 3px solid var(--vehicle-color);
   border-radius: 50%;
-  background: var(--vehicle-color);
-  color: #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.6);
+  background: var(--color-surface);
+  color: #1a1a1a;
+  box-shadow: 0 0 0 1px #fff, 0 0 0 2px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.6);
   transition: transform 0.15s ease;
 }
 
 :root[data-theme="dark"] .vehicle-marker {
-  color: #000;
+  color: #fff;
 }
 
 .vehicle-bus {
@@ -850,7 +847,7 @@ button.vehicle-card {
 /* Rotate only the edge indicator; the bus stays upright. */
 .vehicle-heading {
   position: absolute;
-  inset: -2px;
+  inset: -3px;
   pointer-events: none;
 }
 

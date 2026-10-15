@@ -157,7 +157,7 @@ test('transient search failures fade after ten seconds without hiding an ongoing
   await page.clock.runFor(300);
   await expect(transient).toHaveCount(0);
   await expect(page.locator('#status-banner')).toContainText('vehicles:');
-  await expect(page.locator('#status-banner')).toContainText('Live data: unavailable');
+  await expect(page.locator('#status-banner')).toContainText('Live data: unavailable (44 stops failed to refresh)');
   expect(await page.evaluate(async () => (await import('/js/appState.js')).store.get().errors.stopNotFound)).toBeNull();
 });
 
@@ -308,4 +308,252 @@ test('hovered and selected bus previews end at the third upcoming stop', async (
   await page.locator('h1').hover();
   await expect(page.locator('.vehicle-next-stop-path')).toHaveCount(1);
   expect((await endpoint()).distance).toBeLessThan(2);
+});
+
+// --- SSE transport ---------------------------------------------------------
+// These tests drive the real `src/js/poller.js` against a fake,
+// fully test-controlled EventSource (installed before any page script runs,
+// so `typeof EventSource === 'function'` holds and poller.js uses it exactly
+// like a real stream) rather than the fixture server's real
+// GET /api/v1/stream. That keeps delivery timing, revision/epoch ordering
+// and reconnect counts deterministic and independent of the real collector's
+// cadence - the fixture server still serves every plain HTTP endpoint
+// (bootstrap, buses fallback, departures), so only the stream transport
+// itself is faked. Two scenarios (cold/outage recovery, catalog-version
+// change) instead drive the actual fixture server and its real collector
+// end-to-end, with no fake stream at all, for genuine integration coverage.
+//
+// `initPoller()` opens the stream AND fires one immediate HTTP /buses read
+// as soon as the page loads (both independent of any fake 'open' event), so
+// `**/api/v1/buses` routes must be registered *before* page.goto() to catch
+// that first read - the catalogVersion is fetched the same way, via the
+// `request` fixture, before navigating.
+async function installFakeEventSource(page) {
+  await page.addInitScript(() => {
+    window.__sse = { instances: [], closedCount: 0 };
+    class FakeEventSource extends EventTarget {
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = 0;
+        window.__sse.instances.push(this);
+      }
+      close() {
+        if (this.readyState === 2) return;
+        this.readyState = 2;
+        window.__sse.closedCount += 1;
+      }
+    }
+    window.EventSource = FakeEventSource;
+  });
+}
+async function sseCount(page) { return page.evaluate(() => window.__sse.instances.length); }
+async function sseClosedCount(page) { return page.evaluate(() => window.__sse.closedCount); }
+async function sseOpen(page, index) {
+  await page.evaluate((i) => {
+    const source = window.__sse.instances[i];
+    source.readyState = 1;
+    source.dispatchEvent(new Event('open'));
+  }, index);
+}
+async function sseEmit(page, index, type, data) {
+  await page.evaluate(({ i, type, data }) => {
+    window.__sse.instances[i].dispatchEvent(new MessageEvent(type, { data: JSON.stringify(data) }));
+  }, { i: index, type, data });
+}
+async function fetchCatalogVersion(request) { return (await (await request.get('/api/v1/bootstrap')).json()).catalog.version; }
+async function catalogVersion(page) {
+  return page.evaluate(async () => (await import('/js/appState.js')).store.get().catalogInfo.version);
+}
+async function schedule(page) {
+  return page.evaluate(async () => (await import('/js/poller.js')).getLiveVehiclesSchedule());
+}
+function busesDto(version, { epoch = 'epoch-a', revision = 1, vehicles = [], quality = { state: 'fresh', reasons: [] }, error = null } = {}) {
+  return {
+    generatedAt: new Date().toISOString(), serverTime: new Date().toISOString(),
+    epoch, revision, catalogVersion: version, vehicles, lineRoutes: {}, quality, error,
+  };
+}
+
+test('healthy SSE delivers snapshots and never falls back to HTTP polling', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let busesRequests = 0;
+  await page.route('**/api/v1/buses', (route) => {
+    busesRequests++;
+    route.fulfill({ json: busesDto(version, { revision: 1 }) });
+  });
+  await page.goto('/'); // initPoller() auto-opens the stream + fires the one immediate HTTP read
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await expect.poll(() => busesRequests).toBe(1);
+  await sseOpen(page, 0);
+  await expect.poll(() => schedule(page).then((s) => s.connected)).toBe(true);
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 }));
+  await page.clock.runFor(59000);
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 3 }));
+  await page.clock.runFor(59000);
+  expect(await sseCount(page)).toBe(1); // never reconnected: each delivery re-armed the watchdog in time
+  expect(busesRequests).toBe(1); // still just the one initial HTTP read, no fallback ever triggered
+});
+
+test('a silently stuck SSE stream (heartbeats/open only, no data) reconnects exactly once at the 60s watchdog', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let busesRequests = 0;
+  await page.route('**/api/v1/buses', (route) => {
+    busesRequests++;
+    route.fulfill({ json: busesDto(version, { revision: 1 }) });
+  });
+  await page.goto('/');
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await expect.poll(() => busesRequests).toBe(1);
+  await sseOpen(page, 0);
+  await page.clock.runFor(55000);
+  expect(await sseCount(page)).toBe(1); // nothing arrived, well under 60s
+  await page.clock.runFor(10000); // comfortably past the 60s mark
+  await expect.poll(() => sseCount(page)).toBe(2); // exactly one bounded reconnect, no duplicate streams
+  await expect.poll(() => busesRequests).toBe(2); // the watchdog's own HTTP fallback read
+  expect(await sseClosedCount(page)).toBe(1); // the stuck stream was closed, not just abandoned
+});
+
+test('HTTP fallback recovers the picture, then the reconnected stream keeps delivering', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let busesRequests = 0;
+  await page.route('**/api/v1/buses', (route) => {
+    busesRequests++;
+    route.fulfill({ json: busesDto(version, { revision: busesRequests }) });
+  });
+  await page.goto('/');
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await expect.poll(() => busesRequests).toBe(1);
+  await sseOpen(page, 0);
+  await page.clock.runFor(60000);
+  await expect.poll(() => sseCount(page)).toBe(2); // reconnected; the fallback fetch above recovered revision 2
+  await expect.poll(() => schedule(page).then((s) => s.connected)).toBe(false);
+  await sseOpen(page, 1);
+  await expect.poll(() => schedule(page).then((s) => s.connected)).toBe(true);
+  await sseEmit(page, 1, 'buses', busesDto(version, { revision: busesRequests + 1 }));
+  await page.clock.runFor(59000);
+  expect(await sseCount(page)).toBe(2); // the fresh delivery re-armed the watchdog; no second reconnect
+});
+
+test('selected-stop departures refetch once per genuinely new revision pushed over the stream', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let departuresRequests = 0;
+  await page.route('**/api/v1/buses', (route) => route.fulfill({ json: busesDto(version, { revision: 1 }) }));
+  await page.route('**/api/v1/stops/*/departures', (route) => {
+    departuresRequests++;
+    route.fulfill({ json: { calls: [], messages: [], isStopCancelled: false, updatedAt: new Date().toISOString(), state: 'fresh' } });
+  });
+  await page.goto('/');
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await sseOpen(page, 0);
+  await page.locator('#map-stops-toggle').click();
+  await page.locator('#stop-search').fill(catalog.stops[0].text);
+  await page.clock.runFor(350);
+  await page.locator('#stop-search-results li').first().click();
+  await expect.poll(() => departuresRequests).toBe(1); // immediate fetch on selection
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 }));
+  await expect.poll(() => departuresRequests).toBe(2); // a genuinely new revision while selected
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 })); // duplicate
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 1 })); // stale
+  await page.waitForTimeout(50);
+  expect(departuresRequests).toBe(2); // neither duplicate nor stale revision triggers a refetch
+});
+
+test('catalog version change pushed over the stream triggers exactly one coalesced bootstrap refresh', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let bootstrapRequests = 0;
+  await page.route('**/api/v1/buses', (route) => route.fulfill({ json: busesDto(version, { revision: 1 }) }));
+  await page.route('**/api/v1/bootstrap', (route) => {
+    bootstrapRequests++;
+    route.continue();
+  });
+  await page.goto('/'); // the initial loadConfig() bootstrap fetch is the baseline below
+  await expect.poll(() => sseCount(page)).toBe(1);
+  const baseline = bootstrapRequests;
+  await sseOpen(page, 0);
+  await sseEmit(page, 0, 'buses', busesDto('new-catalog-version', { revision: 2 }));
+  await sseEmit(page, 0, 'buses', busesDto('new-catalog-version', { revision: 3 })); // same new version again
+  await expect.poll(() => bootstrapRequests).toBe(baseline + 1); // coalesced into a single refresh, not one per event
+});
+
+test('hidden tab closes the stream and cancels timers; resuming opens exactly one fresh stream', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  await page.route('**/api/v1/buses', (route) => route.fulfill({ json: busesDto(version, { revision: 1 }) }));
+  await page.goto('/');
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await sseOpen(page, 0);
+  await page.evaluate(() => {
+    window.testHidden = true;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => window.testHidden });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => sseClosedCount(page)).toBe(1);
+  await page.clock.runFor(180000); // well past the watchdog: no reconnect while hidden
+  expect(await sseCount(page)).toBe(1);
+  await page.evaluate(() => { window.testHidden = false; document.dispatchEvent(new Event('visibilitychange')); });
+  await expect.poll(() => sseCount(page)).toBe(2); // exactly one fresh connection on resume, no leaked duplicate
+  await sseOpen(page, 1);
+  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 99 })); // late write from the closed, abandoned stream
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(async () => (await import('/js/tracking.js')).getTrackingState().revision)).not.toBe(99);
+});
+
+test('a late previous-epoch HTTP fallback response cannot resurrect state after the stream moves to a new epoch', async ({ page, request }) => {
+  await installFakeEventSource(page);
+  await page.clock.install();
+  const version = await fetchCatalogVersion(request);
+  let resolveLateFallback;
+  const lateFallback = new Promise((resolve) => { resolveLateFallback = resolve; });
+  let busesRequests = 0;
+  await page.route('**/api/v1/buses', async (route) => {
+    busesRequests++;
+    if (busesRequests === 1) return route.fulfill({ json: busesDto(version, { epoch: 'epoch-a', revision: 1 }) });
+    await lateFallback; // the watchdog-triggered fallback: held open until released below
+    route.fulfill({ json: busesDto(version, { epoch: 'epoch-a', revision: 5 }) }); // stale process by the time it lands
+  });
+  await page.goto('/');
+  await expect.poll(() => sseCount(page)).toBe(1);
+  await expect.poll(() => busesRequests).toBe(1);
+  await sseOpen(page, 0);
+  await page.clock.runFor(60000); // fires the watchdog: reconnects (instance 1) and starts the held-open fallback above
+  await expect.poll(() => sseCount(page)).toBe(2);
+  await expect.poll(() => busesRequests).toBe(2); // confirms the held-open fallback request is in flight
+  await sseOpen(page, 1);
+  // The new connection observes a brand-new server process before the old
+  // fallback request resolves.
+  await sseEmit(page, 1, 'buses', busesDto(version, { epoch: 'epoch-b', revision: 1 }));
+  await page.waitForTimeout(20);
+  resolveLateFallback();
+  await page.waitForTimeout(50);
+  const state = await page.evaluate(async () => (await import('/js/tracking.js')).getTrackingState());
+  expect(state).toEqual({ epoch: 'epoch-b', revision: 1 }); // the late epoch-a:5 response never applied
+});
+
+test('cold start recovers via a live stream push once upstream becomes available, with no manual HTTP read', async ({ page, request }) => {
+  await page.goto('/');
+  await expect(page.locator('#status-banner')).toContainText('vehicles:');
+  await request.post('/__test/mode/live'); // forces one real dynamic cycle before responding
+  const card = page.locator('#live-buses button[data-journey-id="101"]');
+  await expect(card).toHaveCount(1); // delivered by the already-open real SSE stream's push, not a fresh HTTP poll
+});
+
+test('a real catalog-version change propagates through the live stream into a bootstrap refresh', async ({ page, request }) => {
+  await page.goto('/');
+  await expect(page.locator('#line-filters input')).toHaveCount(catalog.lines.length); // catalog has loaded
+  const before = await catalogVersion(page);
+  await request.post('/__test/mode/live'); // a static cycle needs live upstream access to revalidate against
+  await request.post('/__test/catalog-bump');
+  await expect.poll(() => catalogVersion(page)).not.toBe(before);
 });

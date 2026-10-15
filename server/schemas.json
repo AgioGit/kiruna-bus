@@ -153,11 +153,29 @@
       }
     },
     "buses": {
-      "type": "object", "required": ["generatedAt", "serverTime", "vehicles", "lineRoutes", "quality"],
+      "type": "object", "required": ["generatedAt", "serverTime", "vehicles", "lineRoutes", "quality", "epoch", "revision", "catalogVersion"],
       "properties": {
+        "epoch": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "catalogVersion": { "type": "string", "minLength": 1 },
         "generatedAt": { "type": "string", "format": "date-time" }, "serverTime": { "type": "string", "format": "date-time" },
         "lineRoutes": { "$ref": "#/definitions/lineRoutes" }, "quality": { "$ref": "#/definitions/quality" },
         "vehicles": { "type": "array", "items": { "$ref": "#/definitions/vehicle" } }
+      }
+    },
+    "trackingStatus": {
+      "type": "object", "required": ["epoch", "revision", "catalogVersion", "serverTime", "quality", "error", "retryAfter"],
+      "properties": {
+        "epoch": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "catalogVersion": { "type": "string", "minLength": 1 },
+        "serverTime": { "type": "string", "format": "date-time" },
+        "quality": { "$ref": "#/definitions/quality" },
+        "error": {
+          "type": "object", "required": ["code", "message"],
+          "properties": { "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 } }
+        },
+        "retryAfter": { "type": "integer", "minimum": 0, "description": "Recovery hint in seconds; status events do not reset the snapshot-delivery watchdog." }
       }
     },
     "departures": {

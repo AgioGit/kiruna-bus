@@ -11,7 +11,6 @@ app.server.on('error', (error) => {
 });
 app.server.listen(config.port, config.host, () => {
   telemetry.log('listening', { host: config.host, port: app.server.address().port });
-  app.warmup();
 });
 let stopping = false;
 function shutdown() {

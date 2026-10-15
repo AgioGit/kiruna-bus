@@ -2,11 +2,61 @@
 
 Status: all seven phases implemented and locally verified; not deployed.
 
-Working branch: `mhedqvist-backend-production-readiness`.
+Baseline working branch: `mhedqvist-backend-production-readiness`.
 
 Further improvements after this release are tracked separately in the
 [follow-up roadmap](PRODUCTION_READINESS_FOLLOW_UP.md). That roadmap does not
 expand the agreed implementation scope below.
+
+## Approved live-delivery amendment (2026-10-15)
+
+The user approved replacing the original demand-triggered, 60-second polling
+design with activity-gated scheduled collection and SSE. The baseline phases
+and verification record below describe the earlier implementation; their
+polling intervals, demand-refresh ownership, and unconditional startup warmup
+are superseded by this amendment.
+
+- One shared collector checks calls and positions every 30 seconds by default
+  (configurable to 60 seconds), and static source information every 15 minutes.
+- Collection runs only while a stream is connected or live HTTP activity has
+  occurred within 120 seconds. Probes do not activate it; idle collection stops.
+- Full snapshots are pushed after dynamic cycles. HTTP reads serve the cache,
+  and the browser falls back after 60 seconds without valid snapshot delivery.
+- Retained GPS and departure data keep their original timestamps and expire
+  after three minutes. Failed-stop retention stays six minutes, independent of
+  the new scan interval.
+- Keep one container, scale-to-zero, native Node HTTP, bundled/browser basic
+  catalogs, bounded upstream work, and temporary legacy compatibility.
+- Do not introduce durable live storage, a separate collector service, replay
+  history, deltas, WebSockets, or multiple replicas.
+
+See [current data flow](DATA_FLOW.md) and
+[server operations](../server/README.md) for the current contract and settings.
+The original verification counts below are historical, not the verification
+record for this amendment. Production ingress buffering, connection timeouts,
+provider traffic budgets, and idle scale-down still require release checks.
+
+Local verification of this amendment completed:
+
+- `node --test`: 157 passing unit, contract, HTTP, collector, stream, cache,
+  and browser-state tests.
+- Chromium: all 22 browser flows passed, including real stream recovery,
+  catalog propagation, silent-stream fallback, hidden tabs, and stale-epoch
+  response rejection.
+- Production image `sha256:6227b946104cc77e1bb6779240104d0c28a62b26724db1385ec48a67524e4671`:
+  blocked-upstream startup and immediate SSE status passed before and after
+  restart. Process epochs changed across restart. With a shortened test activity
+  window, client disconnect/expiry left no active collector, stream, or queued
+  upstream work. Graceful shutdown completed in 0.37 seconds.
+- The image runs as UID 1000, installs Ajv 8.20.0, and excludes browser-test
+  dependencies.
+- Sonnet implementation and code review completed. Review findings were fixed:
+  slow-reader sockets are destroyed, HTTP fallback propagates catalog changes,
+  and initial static capture waits for dynamic route discovery. Regression
+  coverage also exercises HTTP-only recovery and cache byte/entry limits.
+
+These checks are local and network-independent; no production deployment or
+synthetic load against Boreal was performed.
 
 ## Implementation and verification record
 

@@ -1,5 +1,5 @@
 import { runPooled, withSignal } from './pool.js';
-import { unavailable as liveUnavailable } from './errors.js';
+import { AppError, unavailable as liveUnavailable } from './errors.js';
 import { randomUUID } from 'node:crypto';
 import { setMaxListeners } from 'node:events';
 
@@ -10,17 +10,21 @@ export const UPCOMING_STOP_COUNT = 2;
 // and are shown for at most three minutes.
 export const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 
+// How long a stop's last-known GetCalls response stays usable for building
+// journeys/positions when that stop can't be refreshed (e.g. upstream flakes
+// on one stop during a cycle). Fixed independently of the collector's dynamic
+// cycle cadence so a faster collector cadence can't shrink this window.
+export const CALL_RETENTION_MS = 6 * 60 * 1000;
+
 const DEFAULT_OPTIONS = {
-  scanIntervalMs: 3 * 60 * 1000, // full GetCalls scan of every stop
-  minRescanIntervalMs: 30 * 1000, // earliest a position failure can force a rescan
-  positionsTtlMs: 15 * 1000,
   stopsTtlMs: 6 * 60 * 60 * 1000,
   clockTtlMs: 10 * 60 * 1000,
   retryAfterFailureMs: 60 * 1000,
   retryDelayMs: 500, // pause before the single retry of a failed per-stop GetCalls
-  maxWaitMs: 8 * 1000, // longest a request waits for a refresh when it already has data to serve
   scanConcurrency: 8,
   positionConcurrency: 15,
+  callCacheMaxBytes: 16 * 1024 * 1024,
+  callCacheMaxEntries: 1000,
 };
 
 // A journey's TransitCall.id differs at every upcoming stop, but every one
@@ -227,10 +231,15 @@ export function buildVehicles({ journeys, positions, nowMs, unavailableCallIds =
   return distinct.map(({ forecastRank, ...vehicle }) => vehicle);
 }
 
-// Keeps the live bus picture in memory and refreshes it lazily: nothing
-// talks to Boreal until a request arrives and the data is older than its
-// TTL, and concurrent requests share one refresh. So upstream load depends
-// on the TTLs, not on how many people are using the app.
+// Keeps the live bus picture in memory. Nothing in this module decides *when*
+// to talk to Boreal: a caller (normally the shared collector) invokes
+// `collect()`/`refresh()` once per cycle, and every call performs one genuine
+// attempt (no internal TTL/"due" gating, no cache-bypass decisions) — cadence,
+// no-overlap and backoff are the collector's responsibility. Reads
+// (`getSnapshot()`/`getBuses()`) never trigger network activity and never
+// wait on an in-flight collect; they always return the latest *committed*
+// state, computed via a stage/commit pattern so a reader never observes a
+// cycle's new calls paired with its old positions (or vice versa).
 //
 // `api` needs getLines, getStopAreas(lineId), findStopArea(text),
 // getCalls(stopText), getVehiclePosition(callId) and getSystemTimestamp(iso).
@@ -246,7 +255,6 @@ async function withRetry(fn, delayMs) {
 
 export function createTracker({ api, now = Date.now, options = {}, initialStops = [], stopSource, telemetry }) {
   const opt = { ...DEFAULT_OPTIONS, ...options };
-  const maxScanAgeMs = opt.scanIntervalMs * 2;
 
   let clockOffsetMs = 0;
   let clockAt = Number.NEGATIVE_INFINITY;
@@ -258,18 +266,15 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
   for (const stop of initialStops) stopLocations.set(stop.id, { text: stop.text, location: stop.location });
 
   let journeys = new Map();
-  const lineRoutes = new Map(); // lineId -> Set<routeId>, only ever grows
+  let lineRoutes = new Map(); // lineId -> Set<routeId>, staged/committed together with journeys
   let lastScanAt = Number.NEGATIVE_INFINITY;
-  let scanBackoffUntil = 0;
-  let rescanRequested = false;
   let scanError = null;
 
   let positions = new Map(); // callId -> VehiclePosition
   let positionsAt = Number.NEGATIVE_INFINITY;
-  let positionsDirty = false;
   let positionsError = null;
   let unavailableCallIds = new Set();
-  const lastKnownJourneys = new Map();
+  let lastKnownJourneys = new Map();
 
   let refreshing = null;
   let completed = false;
@@ -278,10 +283,11 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
   let positionCoverage = { attempted: 0, succeeded: 0, failed: 0, missing: 0 };
   let lastSuccessfulScan = null;
   let lastSuccessfulPositions = null;
-  const callsByStop = new Map();
+  let revision = 0;
+  let callsByStop = new Map(); // stopAreaId -> { calls, messages, isStopCancelled, at, text } (raw, shared with departures)
   const shutdown = new AbortController();
   let operationSignal;
-  const apiOptions = () => ({ signal: operationSignal, priority: 'background' });
+  const apiOptions = (extra = {}) => ({ signal: operationSignal, priority: 'interactive', ...extra });
 
   const serverNow = () => now() + clockOffsetMs;
 
@@ -357,157 +363,186 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     return stopsInFlight;
   }
 
-  const scanDue = () => {
-    if (now() < scanBackoffUntil) return false;
-    const age = now() - lastScanAt;
-    return age >= opt.scanIntervalMs || (rescanRequested && age >= opt.minRescanIntervalMs);
-  };
-
-  const positionsDue = () => positionsDirty || now() - positionsAt >= opt.positionsTtlMs;
-
-  async function scan() {
-    const stopList = await ensureStops();
+  // One stage of calls: fetch every stop's GetCalls (one retry each), but do
+  // not touch any committed state yet.
+  async function stageCalls(stopList, { fresh }) {
+    let bytes = 0;
     const results = await runPooled(stopList, opt.scanConcurrency, async (stop) => {
-      const resp = await withRetry(() => api.getCalls(stop.text, apiOptions()), opt.retryDelayMs);
+      const resp = await withRetry(() => api.getCalls(stop.text, apiOptions({ fresh })), opt.retryDelayMs);
       operationSignal?.throwIfAborted();
-      return { calls: (resp?.calls ?? []).flatMap((group) => group.calls ?? []), at: resp.fetchedAt ?? now() };
+      const entry = {
+        calls: (resp?.calls ?? []).flatMap((group) => group.calls ?? []),
+        messages: resp?.messages ?? [],
+        isStopCancelled: Boolean(resp?.isStopCancelled),
+        at: resp.fetchedAt ?? now(),
+      };
+      const size = Buffer.byteLength(JSON.stringify(entry));
+      if (bytes + size > opt.callCacheMaxBytes) {
+        telemetry?.count('callCacheLimit');
+        throw new AppError('LIVE_CACHE_LIMIT', 'Collected stop data exceeds the live cache limit.', { status: 503 });
+      }
+      bytes += size;
+      return entry;
     }, { signal: operationSignal });
     operationSignal?.throwIfAborted();
-    const succeeded = results.filter((res) => res.status === 'fulfilled').length;
-    coverage = { attempted: stopList.length, succeeded, failed: stopList.length - succeeded };
-    if (succeeded === 0) throw new Error('Unable to refresh live bus data.');
-    results.forEach((res, i) => {
-      if (res.status === 'fulfilled') callsByStop.set(stopList[i].id, { ...res.value, text: stopList[i].text });
-    });
-    const callsWithStop = [];
-    const knownStops = new Set(stopList.map((stop) => stop.id));
-    for (const [id, entry] of callsByStop) {
-      if (!knownStops.has(id) || now() - entry.at > maxScanAgeMs) {
-        callsByStop.delete(id);
-        continue;
-      }
-      for (const call of entry.calls) callsWithStop.push({ call, stopText: entry.text });
-    }
-
-    lineRoutes.clear();
-    for (const { call } of callsWithStop) {
-      if (!call.routeId) continue;
-      const routes = lineRoutes.get(call.lineId) ?? new Set();
-      routes.add(call.routeId);
-      lineRoutes.set(call.lineId, routes);
-    }
-    journeys = buildJourneys(callsWithStop);
-    lastScanAt = now();
-    if (!coverage.failed) lastSuccessfulScan = new Date(Math.min(...results.map((res) => res.value.at))).toISOString();
-    scanError = coverage.failed ? 'Some stops could not be refreshed.' : null;
-    rescanRequested = false;
-    positionsDirty = true;
+    return results;
   }
 
-  async function fetchPositions() {
-    const callIds = [...new Set([...journeys.values()].flatMap((info) => info.positionCallIds))];
-    const results = await runPooled(callIds, opt.positionConcurrency, (callId) => api.getVehiclePosition(callId, apiOptions()), { signal: operationSignal });
+  // One cycle: fetch calls for every stop, then positions for every call id
+  // implied by those calls, entirely into local "staged" values, and only
+  // then commit everything in one synchronous block. A reader can therefore
+  // never see this cycle's calls paired with the previous cycle's positions.
+  async function collectOnce({ fresh = true } = {}) {
+    await ensureClock();
+    const stopList = await ensureStops();
+    if (stopList.length > opt.callCacheMaxEntries) {
+      throw new AppError('LIVE_CACHE_LIMIT', 'The stop catalog exceeds the live cache limit.', { status: 503 });
+    }
+
+    const callResults = await stageCalls(stopList, { fresh });
+    const succeeded = callResults.filter((res) => res.status === 'fulfilled').length;
+    const newCoverage = { attempted: stopList.length, succeeded, failed: stopList.length - succeeded };
+    const scanOk = succeeded > 0;
+
+    // Base the staged per-stop cache on the currently committed one so a stop
+    // that fails this cycle keeps its previous entry for CALL_RETENTION_MS.
+    const stagedCallsByStop = new Map(callsByStop);
+    callResults.forEach((res, i) => {
+      const id = stopList[i].id;
+      if (res.status === 'fulfilled') stagedCallsByStop.set(id, { ...res.value, text: stopList[i].text, failed: false });
+      else if (stagedCallsByStop.has(id)) stagedCallsByStop.set(id, { ...stagedCallsByStop.get(id), failed: true });
+    });
+    const knownStops = new Set(stopList.map((stop) => stop.id));
+    for (const [id, entry] of stagedCallsByStop) {
+      if (!knownStops.has(id) || now() - entry.at > CALL_RETENTION_MS) stagedCallsByStop.delete(id);
+    }
+    const cacheBytes = [...stagedCallsByStop.values()].reduce((bytes, entry) =>
+      bytes + Buffer.byteLength(JSON.stringify(entry)), 0);
+    if (cacheBytes > opt.callCacheMaxBytes) {
+      throw new AppError('LIVE_CACHE_LIMIT', 'Retained stop data exceeds the live cache limit.', { status: 503 });
+    }
+
+    const callsWithStop = [];
+    for (const [, entry] of stagedCallsByStop) {
+      for (const call of entry.calls) callsWithStop.push({ call, stopText: entry.text });
+    }
+    const stagedLineRoutes = new Map();
+    for (const { call } of callsWithStop) {
+      if (!call.routeId) continue;
+      const set = stagedLineRoutes.get(call.lineId) ?? new Set();
+      set.add(call.routeId);
+      stagedLineRoutes.set(call.lineId, set);
+    }
+    const stagedJourneys = buildJourneys(callsWithStop);
+    const newScanError = !scanOk ? 'Unable to refresh live bus data.'
+      : newCoverage.failed ? 'Some stops could not be refreshed.' : null;
+    const newLastSuccessfulScan = !newCoverage.failed && scanOk
+      ? new Date(Math.min(...callResults.map((res) => res.value.at))).toISOString()
+      : lastSuccessfulScan;
+
+    const callIds = [...new Set([...stagedJourneys.values()].flatMap((info) => info.positionCallIds))];
+    const posResults = await runPooled(callIds, opt.positionConcurrency,
+      (callId) => api.getVehiclePosition(callId, apiOptions({ fresh })), { signal: operationSignal });
     operationSignal?.throwIfAborted();
-    positionCoverage = {
+    const newPositionCoverage = {
       attempted: callIds.length,
-      succeeded: results.filter((res) => res.status === 'fulfilled' && res.value?.location).length,
-      failed: results.filter((res) => res.status === 'rejected').length,
-      missing: results.filter((res) => res.status === 'fulfilled' && !res.value?.location).length,
-      expired: results.filter((res) => res.status === 'fulfilled' && res.value?.location
+      succeeded: posResults.filter((res) => res.status === 'fulfilled' && res.value?.location).length,
+      failed: posResults.filter((res) => res.status === 'rejected').length,
+      missing: posResults.filter((res) => res.status === 'fulfilled' && !res.value?.location).length,
+      expired: posResults.filter((res) => res.status === 'fulfilled' && res.value?.location
         && serverNow() - Date.parse(res.value.timestamp) > STALE_THRESHOLD_MS).length,
     };
 
-    // Keep the actual GPS timestamp, not the time of this fetch. The journey
-    // cache also covers calls disappearing or changing ids during a scan.
-    const next = new Map();
-    const unavailable = new Set();
-    results.forEach((res, i) => {
+    // Keep the actual GPS timestamp, not the time of this fetch (newer GPS
+    // wins over whatever is currently committed, regardless of fetch order).
+    const stagedPositions = new Map();
+    const stagedUnavailable = new Set();
+    posResults.forEach((res, i) => {
       const callId = callIds[i];
       const previous = positions.get(callId);
       const incoming = res.status === 'fulfilled' ? res.value : null;
       if (incoming?.location && Number.isFinite(Date.parse(incoming.timestamp))) {
-        next.set(callId, previous && Date.parse(previous.timestamp) > Date.parse(incoming.timestamp)
+        stagedPositions.set(callId, previous && Date.parse(previous.timestamp) > Date.parse(incoming.timestamp)
           ? previous : incoming);
         return;
       }
-      unavailable.add(callId);
-      if (previous) next.set(callId, previous);
+      stagedUnavailable.add(callId);
+      if (previous) stagedPositions.set(callId, previous);
     });
 
-    positions = next;
-    unavailableCallIds = unavailable;
-    for (const [journeyId, info] of journeys) {
+    const stagedLastKnownJourneys = new Map(lastKnownJourneys);
+    for (const [journeyId, info] of stagedJourneys) {
       const known = new Map(info.positionCallIds
-        .filter((id) => positions.has(id))
-        .map((id) => [id, positions.get(id)]));
-      if (known.size) lastKnownJourneys.set(journeyId, { info, positions: known });
+        .filter((id) => stagedPositions.has(id))
+        .map((id) => [id, stagedPositions.get(id)]));
+      if (known.size) stagedLastKnownJourneys.set(journeyId, { info, positions: known });
     }
-    positionsAt = now();
-    positionsDirty = false;
-    const gotFix = results.some((res) => res.status === 'fulfilled' && res.value?.location &&
+    const gotFix = posResults.some((res) => res.status === 'fulfilled' && res.value?.location &&
       Number.isFinite(Date.parse(res.value.timestamp)));
-    if (unavailable.size) rescanRequested = true;
-    positionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.'
-      : positionCoverage.failed ? 'Some bus positions could not be refreshed.' : null;
-    if (!positionCoverage.failed) lastSuccessfulPositions = new Date(now()).toISOString();
-  }
+    const newPositionsError = callIds.length && !gotFix ? 'Boreal returned no bus positions.'
+      : newPositionCoverage.failed ? 'Some bus positions could not be refreshed.' : null;
 
-  async function doRefresh() {
-    await ensureClock();
-    if (scanDue()) {
-      try {
-        await scan();
-      } catch (err) {
-        scanError = err.message;
-        scanBackoffUntil = now() + opt.retryAfterFailureMs;
-      }
-    }
-    if (positionsDue()) await fetchPositions();
+    // --- Commit: one synchronous block, nothing awaited in between. ---
+    callsByStop = stagedCallsByStop;
+    journeys = stagedJourneys;
+    lineRoutes = stagedLineRoutes;
+    positions = stagedPositions;
+    unavailableCallIds = stagedUnavailable;
+    lastKnownJourneys = stagedLastKnownJourneys;
+    coverage = newCoverage;
+    positionCoverage = newPositionCoverage;
+    scanError = newScanError;
+    positionsError = newPositionsError;
+    if (scanOk) lastScanAt = now();
+    positionsAt = now();
+    if (scanOk) lastSuccessfulScan = newLastSuccessfulScan;
+    if (!newPositionCoverage.failed) lastSuccessfulPositions = new Date(now()).toISOString();
     completed = true;
+    revision += 1;
   }
 
-  function refreshIfNeeded() {
-    if (!refreshing && (scanDue() || positionsDue())) {
+  // Runs one collection cycle now (no due-checking: the caller, normally the
+  // shared collector, owns cadence/backoff). Concurrent calls share one
+  // in-flight cycle. `fresh` bypasses Boreal's opportunistic cache so a
+  // scheduled cycle is a genuine upstream check even when a per-path cache
+  // TTL would otherwise still be valid.
+  function collect({ fresh = true } = {}) {
+    if (!refreshing) {
       const refreshId = randomUUID();
       operationSignal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(options.refreshTimeoutMs ?? 60000)]);
       setMaxListeners(Math.max(opt.scanConcurrency, opt.positionConcurrency) * 3 + 4, operationSignal);
       const started = performance.now();
-      refreshing = doRefresh().catch((error) => {
+      refreshing = collectOnce({ fresh }).catch((error) => {
         scanError = 'Unable to refresh live bus data.';
-        scanBackoffUntil = now() + opt.retryAfterFailureMs;
-        positionsAt = now();
-        positionsDirty = false;
-        telemetry?.log('refresh_failed', { refreshId, code: error.code ?? error.name });
+        const attempted = stops?.length ?? 0;
+        coverage = { attempted, succeeded: 0, failed: attempted };
+        completed = true;
+        revision += 1;
+        telemetry?.log('collect_failed', { refreshId, code: error.code ?? error.name });
       }).finally(() => {
-        telemetry?.duration('refresh', performance.now() - started);
-        telemetry?.log('refresh_completed', { refreshId, durationMs: Math.round(performance.now() - started), scan: coverage, positions: positionCoverage, error: scanError ?? positionsError });
+        telemetry?.duration('collect', performance.now() - started);
+        telemetry?.log('collect_completed', { refreshId, durationMs: Math.round(performance.now() - started), scan: coverage, positions: positionCoverage, error: scanError ?? positionsError });
         refreshing = null;
       });
     }
-    return refreshing ?? Promise.resolve();
+    return refreshing;
   }
 
   return {
-    // Latest snapshot of every live bus, refreshing first if data is stale.
-    // Throws only when there is no data at all and Boreal can't be reached.
-    async getBuses({ wait = true } = {}) {
-      // With data in hand, a slow Boreal must not stall the response: wait a
-      // bit, then serve what we have while the refresh finishes in the background.
-      const refresh = refreshIfNeeded();
-      if (wait && (journeys.size || lastKnownJourneys.size)) {
-        let timer;
-        await Promise.race([refresh, new Promise((resolve) => (timer = setTimeout(resolve, opt.maxWaitMs)))]);
-        clearTimeout(timer);
-      } else if (wait) {
-        await refresh;
-      }
-      if (!wait && !completed) throw liveUnavailable(scanError ? 'LIVE_UNAVAILABLE' : 'WARMING_UP');
+    // Pure read of the latest committed snapshot. Never triggers network
+    // activity and never waits on an in-flight collect(). Throws only when
+    // there is no usable data at all (cold start, or every stale fix expired).
+    getSnapshot({ legacy = false } = {}) {
+      if (!completed) throw liveUnavailable(scanError ? 'LIVE_UNAVAILABLE' : 'WARMING_UP');
       const error = scanError ?? positionsError;
       const nowMs = serverNow();
       const displayJourneys = new Map(journeys);
       const displayPositions = new Map(positions);
       const unavailable = new Set(unavailableCallIds);
       for (const [journeyId, cached] of lastKnownJourneys) {
+        // Exact GPS expiry (STALE_THRESHOLD_MS) is enforced here at read
+        // time against the current clock, regardless of whether a refresh
+        // is in flight or blocked.
         const fresh = new Map([...cached.positions].filter(([, position]) => {
           const age = nowMs - Date.parse(position.timestamp);
           return Number.isFinite(age) && age <= STALE_THRESHOLD_MS;
@@ -527,31 +562,52 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
           unavailable.add(id);
         }
       }
-      if (!displayJourneys.size && error) {
-        if (!wait) throw liveUnavailable('LIVE_UNAVAILABLE');
-        throw new Error(error);
-      }
+      const vehicles = buildVehicles({
+        journeys: displayJourneys, positions: displayPositions, nowMs, unavailableCallIds: unavailable,
+      });
+      if (!legacy && !vehicles.length && error) throw liveUnavailable('LIVE_UNAVAILABLE');
+      if (!displayJourneys.size && error) throw liveUnavailable('LIVE_UNAVAILABLE');
 
       return {
         generatedAt: new Date(now()).toISOString(),
         serverTime: new Date(nowMs).toISOString(),
         error,
         quality: this.quality(),
-        vehicles: buildVehicles({
-          journeys: displayJourneys, positions: displayPositions, nowMs, unavailableCallIds: unavailable,
-        }),
+        vehicles,
         lineRoutes: Object.fromEntries([...lineRoutes].map(([lineId, routeIds]) => [lineId, [...routeIds]])),
       };
     },
 
+    // Legacy reads preserve the previous empty/error response shape.
+    getBuses() { return this.getSnapshot({ legacy: true }); },
+
+    // Unrelated to the collector: resolves every stop's coordinates on
+    // demand, cached for stopsTtlMs. Used by the temporary /api/stops endpoint.
     async getStops() {
       await ensureStops();
       return [...stopLocations].map(([id, { text, location }]) => ({ id, text, location }));
     },
 
-    getSnapshot() { return this.getBuses({ wait: false }); },
+    // Full raw per-stop GetCalls response as last collected, shared with the
+    // departures endpoint so it never performs its own upstream lookup.
+    getStopCalls(stopId) {
+      const entry = callsByStop.get(stopId);
+      if (!entry) return null;
+      return { calls: entry.calls, messages: entry.messages, isStopCancelled: entry.isStopCancelled,
+        at: entry.at, text: entry.text, failed: entry.failed };
+    },
+
+    getRevision: () => revision,
+
+    // Committed call/route associations, in the same shape captureCatalog
+    // expects, so the static cycle can consume them instead of re-scanning
+    // every stop's GetCalls itself.
+    getLineRoutes() {
+      return Object.fromEntries([...lineRoutes].map(([lineId, routeIds]) => [lineId, [...routeIds]]));
+    },
     serverTime: () => new Date(serverNow()).toISOString(),
-    refresh: () => refreshIfNeeded(),
+    collect,
+    refresh: (opts) => collect(opts), // alias kept for existing callers/fixtures
     close: () => shutdown.abort(new DOMException('Server shutting down', 'AbortError')),
     quality() {
       const reasons = [];
@@ -561,11 +617,12 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       if (positionsError) reasons.push(positionCoverage.failed ? 'POSITION_FAILURE' : 'NO_POSITION_FIX');
       if (expired) reasons.push('GPS_OLD');
       if (!clockSynchronized) reasons.push('CLOCK_UNSYNCHRONIZED');
-      // Refresh TTLs schedule demand-driven work; they do not expire the snapshot.
-      if (Number.isFinite(lastScanAt) && now() - lastScanAt > maxScanAgeMs) reasons.push('SCAN_OLD');
+      // Snapshot ages, not collector cadence, drive these two: how long
+      // since the last *successful* commit, independent of cycle interval.
+      if (Number.isFinite(lastScanAt) && now() - lastScanAt > CALL_RETENTION_MS) reasons.push('SCAN_OLD');
       if (Number.isFinite(positionsAt) && now() - positionsAt > STALE_THRESHOLD_MS) reasons.push('POSITIONS_OLD');
       return {
-        state: !completed ? 'unavailable' : reasons.includes('SCAN_FAILED') || reasons.includes('SCAN_OLD') || reasons.includes('POSITIONS_OLD') || reasons.includes('GPS_OLD')
+        state: !completed || !Number.isFinite(lastScanAt) ? 'unavailable' : reasons.includes('SCAN_FAILED') || reasons.includes('SCAN_OLD') || reasons.includes('POSITIONS_OLD') || reasons.includes('GPS_OLD')
           ? 'stale' : reasons.length ? 'partial' : 'fresh',
         reasons, scan: { ...coverage }, positions: { ...positionCoverage, expired },
         lastScanAt: lastSuccessfulScan, positionsAt: lastSuccessfulPositions, clockSynchronized,
@@ -580,6 +637,7 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
         error: scanError ?? positionsError,
         quality: this.quality(),
         refreshing: Boolean(refreshing),
+        revision,
       };
     },
   };

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Kiruna Bus application API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Same-origin website API, independent of Boreal's upstream contract. Cached basic information is not live data. Live GPS fixes expire after three minutes. Public data does not require authentication; requests and upstream work are bounded."
   },
   "jsonSchemaDialect": "http://json-schema.org/draft-07/schema#",
@@ -23,10 +23,34 @@
     "/api/v1/buses": {
       "get": {
         "operationId": "buses",
-        "summary": "Read a live snapshot; trigger shared refresh without waiting",
-        "description": "A successful response can be partial or stale: inspect quality and original GPS timestamps. generatedAt is response assembly time, not data freshness. A successful empty scan is distinct from a 503 unknown live picture.",
+        "summary": "Read the cached live snapshot and register collector activity",
+        "description": "Never waits for or starts a request-specific upstream fetch. Live HTTP reads keep the shared collector active for 120 seconds; SSE connections also keep it active. A successful response can be partial or stale: inspect quality and original GPS timestamps. generatedAt is response assembly time, not data freshness. epoch identifies the process, revision orders dynamic publications within that epoch, and catalogVersion identifies static content. A successful empty scan is distinct from a 503 unknown live picture.",
         "responses": {
           "200": { "description": "Vehicle snapshot", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/buses" } } } },
+          "503": { "$ref": "#/components/responses/Error" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/stream": {
+      "get": {
+        "operationId": "streamBuses",
+        "summary": "Subscribe to complete live snapshots over server-sent events",
+        "description": "Keeps the shared collector active until disconnected. Immediately sends a full cached buses event or tracking-status when tracking is warming/unavailable; completed collection cycles publish subsequent events. IDs are epoch:revision. Last-Event-ID is not replayed: every connection resynchronizes with the current full snapshot. Heartbeat comments arrive every 15 seconds and do not establish data freshness or reset the browser's 60-second snapshot watchdog. Status-only events do not reset it either. Connections and slow-reader buffers are bounded; shutdown closes streams.",
+        "responses": {
+          "200": {
+            "description": "Incremental UTF-8 SSE frames. Named events have JSON data matching the event schemas below. Headers disable caching/transformation and request proxy buffering to be disabled.",
+            "headers": {
+              "Cache-Control": { "schema": { "type": "string", "const": "no-cache, no-transform" } },
+              "X-Accel-Buffering": { "schema": { "type": "string", "const": "no" } }
+            },
+            "content": { "text/event-stream": { "schema": { "type": "string" } } },
+            "x-event-schemas": {
+              "buses": { "$ref": "./server/schemas.json#/definitions/buses" },
+              "tracking-status": { "$ref": "./server/schemas.json#/definitions/trackingStatus" }
+            }
+          },
+          "429": { "$ref": "#/components/responses/Error" },
           "503": { "$ref": "#/components/responses/Error" },
           "default": { "$ref": "#/components/responses/Error" }
         }
@@ -48,7 +72,7 @@
         "operationId": "departures",
         "summary": "Normalized stop departures and disruptions",
         "parameters": [{ "name": "stopId", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }],
-        "description": "Uses the same upstream call cache as the tracker. On failure a last-good response can be served as state=stale for at most three minutes from updatedAt. Browser display also expires at that boundary.",
+        "description": "Registers live-client activity and reads the collector's complete per-stop calls cache without contacting the source. Includes cancellation and disruption messages. Failed refreshes retain last-good data as state=stale for at most three minutes from original updatedAt. Missing or expired data returns 503 with Retry-After. Browser display expires at the same boundary.",
         "responses": {
           "200": { "description": "Departures", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/departures" } } } },
           "default": { "$ref": "#/components/responses/Error" }

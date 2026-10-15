@@ -26,6 +26,14 @@ export function loadConfig(env = process.env) {
   }
   const upstreamConcurrency = integer('UPSTREAM_CONCURRENCY', 16, 2, 128);
   return {
+    dynamicIntervalMs: integer('DYNAMIC_INTERVAL_MS', 30000, 30000, 60000),
+    staticIntervalMs: integer('STATIC_INTERVAL_MS', 900000, 60000, 3600000),
+    activityIdleMs: integer('ACTIVITY_IDLE_MS', 120000, 5000, 600000),
+    streamMaxConnections: integer('STREAM_MAX_CONNECTIONS', 256, 1, 10000),
+    streamMaxConnectionsPerClient: integer('STREAM_MAX_CONNECTIONS_PER_CLIENT', 16, 1, 1000),
+    streamHeartbeatMs: integer('STREAM_HEARTBEAT_MS', 15000, 1000, 15000),
+    streamSlowReaderMs: integer('STREAM_SLOW_READER_MS', 5000, 500, 60000),
+    streamMaxPendingBytes: integer('STREAM_MAX_PENDING_BYTES', 262144, 1024, 10 * 1024 * 1024),
     port: integer('PORT', 8080, 0, 65535),
     host: env.HOST ?? '0.0.0.0',
     borealBase: borealBase.replace(/\/+$/, ''),

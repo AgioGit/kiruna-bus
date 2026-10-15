@@ -141,3 +141,16 @@ test('invalid provider configuration is rejected before caching while extra fiel
     assert.equal(calls, 2);
   } finally { api.close(); }
 });
+
+test('scheduled fresh checks bypass a valid static cache while ordinary readers reuse it', async () => {
+  let calls = 0;
+  const api = createBoreal({ settings, telemetry: quiet(), fetchImpl: async () =>
+    Response.json([{ id: 1, text: `Line ${++calls}` }]) });
+  try {
+    assert.equal((await api.getLines())[0].text, 'Line 1');
+    assert.equal((await api.getLines())[0].text, 'Line 1');
+    assert.equal((await api.getLines({ fresh: true }))[0].text, 'Line 2');
+    assert.equal((await api.getLines())[0].text, 'Line 2');
+    assert.equal(calls, 2);
+  } finally { api.close(); }
+});

@@ -13,7 +13,11 @@ const stopDto = ({ id, text, location }) => ({ id, text, location: point(locatio
 export const routeDto = (route) => ({ locations: route.locations.map(point) });
 
 export function sealCatalog(data) {
-  const version = createHash('sha256').update(canonicalJson(data)).digest('hex');
+  // Content hash excludes capturedAt: an unchanged successful check (same
+  // lines/stops/routes/config) must not mint a new catalog version just
+  // because it ran at a different time.
+  const { capturedAt, ...content } = data;
+  const version = createHash('sha256').update(canonicalJson(content)).digest('hex');
   return validateCatalog({ ...data, version });
 }
 
@@ -37,9 +41,11 @@ export function loadCatalog(file) {
   return validateCatalog(JSON.parse(readFileSync(file, 'utf8')));
 }
 
-export async function captureCatalog({ api, previous, signal, acceptRemovals = false, now = Date.now }) {
+export async function captureCatalog({
+  api, previous, signal, acceptRemovals = false, now = Date.now, fresh = false, lineRoutes: suppliedLineRoutes,
+}) {
   if (signal) setMaxListeners(32, signal); // Eight workers each have bounded queue/wait cancellation listeners.
-  const options = { signal, priority: 'background' };
+  const options = { signal, priority: 'background', fresh };
   const [config, rawLines] = await withSignal(Promise.all([api.getConfig(options), api.getLines(options)]), signal);
   const lines = validate('lines', rawLines, { upstream: true }).map(lineDto);
   const areas = await runPooled(lines, 8, (line) => api.getStopAreas(line.id, options), { signal });
@@ -59,13 +65,34 @@ export async function captureCatalog({ api, previous, signal, acceptRemovals = f
       throw new Error('Catalog coverage decreased; review removals before using --accept-removals');
     }
   }
-  const calls = await runPooled(stops, 8, (stop) => api.getCalls(stop.text, options), { signal });
-  const failedCalls = calls.find((result) => result.status === 'rejected');
-  if (failedCalls) throw failedCalls.reason;
   const lineRoutes = Object.fromEntries(lines.map((line) => [line.id, new Set(previous?.lineRoutes[line.id] ?? [])]));
-  for (const response of calls) {
-    for (const call of response.value.calls.flatMap((group) => group.calls)) {
-      if (call.routeId && lineRoutes[call.lineId]) lineRoutes[call.lineId].add(call.routeId);
+  if (suppliedLineRoutes) {
+    // Consume call/route associations already collected by the shared live
+    // collector instead of re-scanning every stop's GetCalls here too.
+    for (const [lineId, routeIds] of Object.entries(suppliedLineRoutes)) {
+      if (!lineRoutes[lineId]) continue;
+      for (const routeId of routeIds) lineRoutes[lineId].add(routeId);
+    }
+    const previousStops = new Set(previous?.stops.map((stop) => stop.id));
+    const newStops = stops.filter((stop) => !previousStops.has(stop.id));
+    if (newStops.length) {
+      const results = await runPooled(newStops, 8, (stop) => api.getCalls(stop.text, options), { signal });
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      for (const result of results) {
+        for (const call of result.value.calls.flatMap((group) => group.calls)) {
+          if (call.routeId && lineRoutes[call.lineId]) lineRoutes[call.lineId].add(call.routeId);
+        }
+      }
+    }
+  } else {
+    const calls = await runPooled(stops, 8, (stop) => api.getCalls(stop.text, options), { signal });
+    const failedCalls = calls.find((result) => result.status === 'rejected');
+    if (failedCalls) throw failedCalls.reason;
+    for (const response of calls) {
+      for (const call of response.value.calls.flatMap((group) => group.calls)) {
+        if (call.routeId && lineRoutes[call.lineId]) lineRoutes[call.lineId].add(call.routeId);
+      }
     }
   }
   const ids = [...new Set(Object.values(lineRoutes).flatMap((set) => [...set]))];
@@ -89,27 +116,35 @@ export async function captureCatalog({ api, previous, signal, acceptRemovals = f
 export function createCatalog({ snapshot, api, telemetry, now = Date.now, refreshTimeoutMs = 60000 }) {
   let current = validateCatalog(snapshot);
   let source = 'bundled';
-  let nextRefresh = 0;
   let refreshing;
   const shutdown = new AbortController();
   const dynamicRoutes = new Map();
   return {
     get: () => current,
     bootstrap: () => ({ catalog: current, source, serverTime: new Date(now()).toISOString() }),
-    async refresh() {
-      if (!refreshing && now() >= nextRefresh && !shutdown.signal.aborted) {
-        nextRefresh = now() + 3600000;
+    // Cadence/backoff is entirely owned by the shared collector; this is a
+    // single-flight, on-demand capture. `fresh` forces a genuine upstream
+    // check bypassing Boreal's opportunistic cache. `lineRoutes` lets the
+    // caller (the collector, from the live tracker) supply already-collected
+    // call/route associations instead of this doing its own per-stop scan.
+    async refresh({ fresh = false, lineRoutes } = {}) {
+      if (!refreshing && !shutdown.signal.aborted) {
         refreshing = captureCatalog({
-          api, previous: current, now,
+          api, previous: current, now, fresh, lineRoutes,
           signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(refreshTimeoutMs)]),
-        }).then((catalog) => { current = catalog; source = 'upstream'; dynamicRoutes.clear(); })
-          .catch((error) => {
-            nextRefresh = now() + 60000;
-            telemetry?.count('catalogFailures');
-            telemetry?.log('catalog_refresh_failed', { code: error.code ?? error.name });
-          }).finally(() => { refreshing = null; });
+        }).then((catalog) => {
+          const changed = catalog.version !== current.version;
+          current = catalog;
+          source = 'upstream';
+          if (changed) dynamicRoutes.clear();
+          return { changed };
+        }).catch((error) => {
+          telemetry?.count('catalogFailures');
+          telemetry?.log('catalog_refresh_failed', { code: error.code ?? error.name });
+          throw error;
+        }).finally(() => { refreshing = null; });
       }
-      return refreshing;
+      return refreshing ?? Promise.resolve({ changed: false });
     },
     async route(id) {
       const known = current.routes[id] ?? dynamicRoutes.get(id);

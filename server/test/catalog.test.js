@@ -87,3 +87,51 @@ test('catalog line discovery stays within eight workers and releases cancellatio
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
 });
+
+test('runtime static checks bypass source caches, reuse dynamic routes, and keep unchanged content versions', async () => {
+  const api = fakeApi();
+  const checked = [];
+  for (const method of ['getConfig', 'getLines', 'getStopAreas', 'findStopArea', 'getMapRoute']) {
+    const original = api[method];
+    api[method] = async (...args) => {
+      assert.equal(args.at(-1).fresh, true, method);
+      checked.push(method);
+      return original(...args);
+    };
+  }
+  api.getCalls = async () => { assert.fail('runtime static check must reuse dynamic calls'); };
+  let time = Date.parse('2026-10-15T06:00:00Z');
+  const catalog = createCatalog({ snapshot, api, now: () => time });
+  try {
+    await catalog.refresh({ fresh: true, lineRoutes: snapshot.lineRoutes });
+    const first = catalog.get();
+    time += 900000;
+    await catalog.refresh({ fresh: true, lineRoutes: snapshot.lineRoutes });
+    assert.equal(catalog.get().version, first.version);
+    assert.notEqual(catalog.get().capturedAt, first.capturedAt);
+    assert.equal(checked.filter((method) => method === 'getConfig').length, 2);
+  } finally { catalog.close(); }
+});
+
+test('a newly discovered line can resolve routes from new stops without rescanning known stops', async () => {
+  const api = fakeApi();
+  const line = { id: 999, text: 'New line' };
+  const stop = { id: 999, text: 'New stop', location: { lat: 67.85, lon: 20.22 } };
+  api.getLines = async () => [...snapshot.lines, line];
+  api.getStopAreas = async (id) => id === line.id ? [stop] : snapshot.stops;
+  const findStop = api.findStopArea;
+  api.findStopArea = (text) => text === stop.text ? stop : findStop(text);
+  const queried = [];
+  api.getCalls = async (text) => {
+    queried.push(text);
+    return { calls: [{ calls: [{ lineId: line.id, routeId: 999 }] }] };
+  };
+  const getRoute = api.getMapRoute;
+  api.getMapRoute = (id) => id === 999 ? { locations: [stop.location, snapshot.stops[0].location] } : getRoute(id);
+  const catalog = createCatalog({ snapshot, api });
+  try {
+    await catalog.refresh({ fresh: true, lineRoutes: snapshot.lineRoutes });
+    assert.deepEqual(queried, [stop.text]);
+    assert.deepEqual(catalog.get().lineRoutes[line.id], [999]);
+  } finally { catalog.close(); }
+});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildJourneys, buildVehicles, createTracker, upcomingStops } from '../lib/tracker.js';
+import { buildJourneys, buildVehicles, createTracker, upcomingStops, CALL_RETENTION_MS } from '../lib/tracker.js';
 
 const T0 = Date.parse('2026-01-01T12:00:00.000Z');
 const iso = (offsetSec) => new Date(T0 + offsetSec * 1000).toISOString();
@@ -118,6 +118,11 @@ function trackerWith(fake) {
   return createTracker({ api: fake.api, now: () => fake.state.now, options: { retryDelayMs: 0 } });
 }
 
+async function collectSnapshot(tracker) {
+  await tracker.collect();
+  return tracker.getSnapshot();
+}
+
 test('a stop whose GetCalls fails once is retried and still counted', async () => {
   const fake = fakeApi();
   const original = fake.api.getCalls;
@@ -129,17 +134,17 @@ test('a stop whose GetCalls fails once is retried and still counted', async () =
     }
     return original(stopText);
   };
-  const resp = await trackerWith(fake).getBuses();
+  const resp = await collectSnapshot(trackerWith(fake));
   assert.equal(resp.vehicles.length, 1);
   assert.equal(resp.vehicles[0].followingStop.stopText, 'B');
   assert.equal(resp.error, null);
 });
 
-test('tracker scans once, then only refreshes positions until the scan interval passes', async () => {
+test('each explicit collection refreshes calls and positions; snapshot reads never fetch', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
 
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
   assert.equal(first.vehicles.length, 1);
   assert.deepEqual(first.vehicles[0].nextStop.stopText, 'A');
   assert.equal(first.vehicles[0].followingStop.stopText, 'B');
@@ -152,74 +157,76 @@ test('tracker scans once, then only refreshes positions until the scan interval 
   assert.equal(fake.counts.calls, 2);
   assert.equal(fake.counts.positions, 1);
 
-  await tracker.getBuses(); // within the position TTL: no upstream traffic
+  tracker.getBuses();
+  tracker.getSnapshot();
   assert.equal(fake.counts.positions, 1);
+  assert.equal(fake.counts.calls, 2);
 
   fake.state.now += 20_000;
-  await tracker.getBuses();
-  assert.equal(fake.counts.calls, 2);
+  await collectSnapshot(tracker);
+  assert.equal(fake.counts.calls, 4);
   assert.equal(fake.counts.positions, 2);
 
   fake.state.now += 3 * 60_000;
-  await tracker.getBuses();
-  assert.equal(fake.counts.calls, 4);
+  tracker.getSnapshot();
+  assert.equal(fake.counts.calls, 4, 'elapsed time alone does not turn reads into collection');
 });
 
-test('concurrent requests share a single refresh', async () => {
+test('concurrent explicit collections share a single cycle', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  await Promise.all([tracker.getBuses(), tracker.getBuses(), tracker.getBuses()]);
+  await Promise.all([tracker.collect(), tracker.collect(), tracker.collect()]);
   assert.equal(fake.counts.calls, 2);
   assert.equal(fake.counts.positions, 1);
 });
 
-test('a failed position fetch keeps the old fix and triggers a rescan after the minimum interval', async () => {
+test('a failed position fetch retains its original fix and a later cycle recovers', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
 
   fake.state.failPositions = true;
   fake.state.now += 20_000;
-  const degraded = await tracker.getBuses();
+  const degraded = await collectSnapshot(tracker);
   assert.equal(degraded.vehicles.length, 1); // previous fix retained
   assert.ok(degraded.vehicles[0].ageMs >= 20_000);
   assert.equal(degraded.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
   assert.equal(degraded.vehicles[0].stale, true);
   assert.ok(degraded.error);
-  assert.equal(fake.counts.calls, 2); // rescan not yet allowed (< 30 s)
+  assert.equal(fake.counts.calls, 4);
 
   fake.state.failPositions = false;
   fake.state.now += 20_000;
-  const recovered = await tracker.getBuses();
-  assert.equal(fake.counts.calls, 4); // early rescan happened
+  const recovered = await collectSnapshot(tracker);
+  assert.equal(fake.counts.calls, 6);
   assert.equal(recovered.error, null);
 });
 
 test('missing positions are retained only through the exact three-minute boundary', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
   const timestamp = first.vehicles[0].position.timestamp;
   fake.api.getVehiclePosition = async () => null;
   fake.state.now = Date.parse(timestamp) + 180_000;
-  const boundary = await tracker.getBuses();
+  const boundary = await collectSnapshot(tracker);
   assert.equal(boundary.vehicles.length, 1);
   assert.equal(boundary.vehicles[0].position.timestamp, timestamp);
   fake.state.now += 1;
-  const expired = await tracker.getBuses();
-  assert.deepEqual(expired.vehicles, []);
-  assert.match(expired.error, /no bus positions/);
+  assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+  assert.deepEqual(tracker.getBuses().vehicles, []);
+  assert.match(tracker.getBuses().error, /no bus positions/);
 });
 
 test('an out-of-order position response does not replace a newer known fix', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
   fake.api.getVehiclePosition = async () => ({
     location: { lat: 67.8, lon: 20.2 }, timestamp: iso(-60),
   });
   fake.state.now += 20_000;
-  const older = await tracker.getBuses();
+  const older = await collectSnapshot(tracker);
   assert.deepEqual(older.vehicles[0].position, first.vehicles[0].position);
 });
 
@@ -238,7 +245,7 @@ test('expired reports stay in quality metadata without becoming a position-fetch
     ? Promise.resolve(expiredPosition) : getVehiclePosition(id);
   const tracker = trackerWith(fake);
   try {
-    const mixed = await tracker.getBuses();
+    const mixed = await collectSnapshot(tracker);
     assert.equal(mixed.vehicles.length, 1);
     assert.equal(mixed.quality.positions.expired, 1);
     assert.equal(mixed.quality.state, 'stale');
@@ -247,7 +254,7 @@ test('expired reports stay in quality metadata without becoming a position-fetch
 
     fake.state.failPositions = true;
     fake.state.now += 20000;
-    const failed = await tracker.getBuses();
+    const failed = await collectSnapshot(tracker);
     assert.match(failed.error, /Some bus positions could not be refreshed/);
     assert.ok(failed.quality.reasons.includes('POSITION_FAILURE'));
     assert.ok(failed.quality.reasons.includes('GPS_OLD'));
@@ -256,7 +263,7 @@ test('expired reports stay in quality metadata without becoming a position-fetch
     fake.state.failPositions = false;
     fake.api.getVehiclePosition = async () => expiredPosition;
     fake.state.now += 200000;
-    const expired = await tracker.getBuses();
+    const expired = await collectSnapshot(tracker);
     assert.deepEqual(expired.vehicles, []);
     assert.equal(expired.quality.positions.expired, 2);
     assert.equal(expired.quality.state, 'stale');
@@ -265,7 +272,7 @@ test('expired reports stay in quality metadata without becoming a position-fetch
 
     fake.api.getVehiclePosition = getVehiclePosition;
     fake.state.now += 20000;
-    const recovered = await tracker.getBuses();
+    const recovered = await collectSnapshot(tracker);
     assert.equal(recovered.vehicles.length, 1);
     assert.equal(recovered.quality.positions.expired, 0);
     assert.equal(recovered.quality.state, 'fresh');
@@ -276,93 +283,108 @@ test('expired reports stay in quality metadata without becoming a position-fetch
 test('a bus missing from a successful departure scan keeps its last known fix until it expires', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
   fake.api.getVehiclePosition = async () => null;
   fake.state.now += 20_000;
-  await tracker.getBuses(); // request an early rescan
+  await tracker.collect();
   fake.api.getCalls = async () => ({ calls: [] });
   fake.state.now += 20_000;
-  const missing = await tracker.getBuses();
+  const missing = await collectSnapshot(tracker);
   assert.equal(missing.vehicles.length, 1);
   assert.equal(missing.vehicles[0].journeyId, first.vehicles[0].journeyId);
   assert.equal(missing.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
   assert.equal(missing.vehicles[0].stale, true);
   fake.state.now += 180_000;
-  assert.deepEqual((await tracker.getBuses()).vehicles, []);
+  assert.deepEqual(tracker.getSnapshot().vehicles, []);
 });
 
 test('a journey whose call ids change falls back to its previous fix and recovers without duplicates', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const first = await tracker.getBuses();
+  const first = await collectSnapshot(tracker);
   const calls = fake.api.getCalls;
   fake.api.getVehiclePosition = async () => null;
   fake.state.now += 20_000;
-  await tracker.getBuses();
+  await tracker.collect();
   fake.api.getCalls = async (stop) => {
     const response = await calls(stop);
     response.calls[0].calls[0].id += '-new';
     return response;
   };
   fake.state.now += 20_000;
-  const retained = await tracker.getBuses();
+  const retained = await collectSnapshot(tracker);
   assert.equal(retained.vehicles.length, 1);
   assert.equal(retained.vehicles[0].position.timestamp, first.vehicles[0].position.timestamp);
   fake.api.getVehiclePosition = async () => ({
     location: { lat: 67.851, lon: 20.221 }, timestamp: new Date(fake.state.now).toISOString(),
   });
   fake.state.now += 20_000;
-  const recovered = await tracker.getBuses();
+  const recovered = await collectSnapshot(tracker);
   assert.equal(recovered.vehicles.length, 1);
   assert.equal(recovered.vehicles[0].stale, false);
   assert.deepEqual(recovered.vehicles[0].callIds, ['call-2-new']);
 });
 
-test('scan failure with no data throws, with old data it is reported and retried only after backoff', async () => {
+test('scan failure is unavailable without data, retains known fixes, and pure reads never retry', async () => {
   const fake = fakeApi();
   fake.state.failCalls = true;
   const tracker = trackerWith(fake);
-  await assert.rejects(tracker.getBuses(), /Unable to refresh live bus data/);
+  await tracker.collect();
+  assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE', status: 503 });
   const callsAfterFailure = fake.counts.calls;
 
-  fake.state.now += 20_000; // inside the retry backoff: no new scan
-  await assert.rejects(tracker.getBuses());
+  fake.state.now += 20_000;
+  assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
   assert.equal(fake.counts.calls, callsAfterFailure);
 
   fake.state.failCalls = false;
   fake.state.now += 60_000;
-  const ok = await tracker.getBuses();
+  const ok = await collectSnapshot(tracker);
   assert.equal(ok.vehicles.length, 1);
 
   fake.state.failCalls = true;
   fake.state.now += 3 * 60_000;
-  const stale = await tracker.getBuses();
+  const stale = await collectSnapshot(tracker);
   assert.equal(stale.vehicles.length, 1);
   assert.match(stale.error, /Unable to refresh live bus data/);
 });
 
-test('a slow refresh does not stall a request that already has data to serve', async () => {
+test('a blocked collection does not stall reads or expose intermediate call results', async () => {
   const fake = fakeApi();
-  const tracker = createTracker({ api: fake.api, now: () => fake.state.now, options: { maxWaitMs: 20 } });
-  await tracker.getBuses();
-
-  const fast = fake.api.getVehiclePosition;
-  fake.api.getVehiclePosition = () => new Promise((resolve) => setTimeout(() => resolve(fast()), 200));
+  const tracker = trackerWith(fake);
+  const initial = await collectSnapshot(tracker);
+  const getCalls = fake.api.getCalls;
+  fake.api.getCalls = async (stop) => {
+    const response = await getCalls(stop);
+    response.calls[0].calls[0].destination = 'Updated destination';
+    return response;
+  };
+  let release;
+  fake.api.getVehiclePosition = () => new Promise((resolve) => { release = resolve; });
   fake.state.now += 20_000;
-  const started = Date.now();
-  const resp = await tracker.getBuses();
-  assert.ok(Date.now() - started < 150);
-  assert.equal(resp.vehicles.length, 1);
+  const pending = tracker.collect();
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    const cached = tracker.getSnapshot();
+    assert.equal(tracker.status().refreshing, true);
+    assert.equal(cached.vehicles[0].destination, initial.vehicles[0].destination);
+    assert.equal(tracker.getStopCalls(1).calls[0].destination, initial.vehicles[0].destination);
+  } finally {
+    release({ location: { lat: 67.85, lon: 20.22 }, timestamp: new Date(fake.state.now).toISOString() });
+    await pending;
+    tracker.close();
+  }
+  assert.equal(tracker.getSnapshot().vehicles[0].destination, 'Updated destination');
 });
 
 test('positions that all come back empty are reported as an error', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  await tracker.getBuses();
+  await tracker.collect();
 
   fake.api.getVehiclePosition = async () => null;
   fake.state.now += 20_000;
-  const resp = await tracker.getBuses();
+  const resp = await collectSnapshot(tracker);
   assert.match(resp.error, /no bus positions/);
   assert.equal(resp.vehicles.length, 1); // previous fix retained
 });
@@ -380,11 +402,11 @@ test('getStops returns each stop with its coordinates, resolved once', async () 
 test('partial scan preserves failed stops without reporting a fully healthy scan', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
-  const initial = await tracker.getBuses();
+  const initial = await collectSnapshot(tracker);
   const getCalls = fake.api.getCalls;
   fake.api.getCalls = (stop) => stop === 'A' ? Promise.reject(new Error('down')) : getCalls(stop);
   fake.state.now += 190000;
-  const partial = await tracker.getBuses();
+  const partial = await collectSnapshot(tracker);
   assert.deepEqual(partial.quality.scan, { attempted: 2, succeeded: 1, failed: 1 });
   assert.equal(partial.quality.state, 'partial');
   assert.equal(partial.quality.lastScanAt, initial.quality.lastScanAt);
@@ -414,7 +436,7 @@ test('cold versioned API reports warming up; successful empty service is healthy
   const fake = fakeApi();
   fake.api.getCalls = async () => ({ calls: [] });
   const tracker = trackerWith(fake);
-  await assert.rejects(tracker.getSnapshot(), { code: 'WARMING_UP', status: 503 });
+  assert.throws(() => tracker.getSnapshot(), { code: 'WARMING_UP', status: 503 });
   await tracker.refresh();
   const empty = await tracker.getSnapshot();
   assert.deepEqual(empty.vehicles, []);
@@ -430,7 +452,7 @@ test('whole refresh deadline releases stuck work even when an adapter ignores ab
   await tracker.refresh();
   clearTimeout(keepAlive);
   assert.equal(tracker.status().refreshing, false);
-  await assert.rejects(tracker.getSnapshot(), { status: 503 });
+  assert.throws(() => tracker.getSnapshot(), { status: 503 });
   tracker.close();
 });
 
@@ -492,5 +514,83 @@ test('collection age warnings use snapshot lifetimes rather than refresh TTLs', 
     assert.equal(tracker.quality().reasons.includes('SCAN_OLD'), false);
     fake.state.now++;
     assert.ok(tracker.quality().reasons.includes('SCAN_OLD'));
+  } finally { tracker.close(); }
+});
+
+test('failed-stop calls retain the original six-minute boundary independent of collection cadence', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  try {
+    await tracker.collect();
+    const getCalls = fake.api.getCalls;
+    fake.api.getCalls = (stop) => stop === 'A' ? Promise.reject(new Error('down')) : getCalls(stop);
+    fake.state.now = T0 + CALL_RETENTION_MS;
+    await tracker.collect();
+    assert.equal(tracker.getStopCalls(1).at, T0);
+    fake.state.now++;
+    await tracker.collect();
+    assert.equal(tracker.getStopCalls(1), null);
+    assert.ok(tracker.getStopCalls(2));
+  } finally { tracker.close(); }
+});
+
+test('total call failure cannot keep fetching positions for journeys beyond call retention', async () => {
+  const fake = fakeApi();
+  const tracker = trackerWith(fake);
+  try {
+    await tracker.collect();
+    const positionRequests = fake.counts.positions;
+    fake.state.failCalls = true;
+    fake.state.now += CALL_RETENTION_MS + 1;
+    await tracker.collect();
+    assert.equal(tracker.getStopCalls(1), null);
+    assert.equal(fake.counts.positions, positionRequests);
+    assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+    assert.equal(tracker.status().quality.scan.succeeded, 0);
+  } finally { tracker.close(); }
+});
+
+test('a whole-cycle timeout preserves source ages and reports failed coverage, not a new successful scan', async () => {
+  const fake = fakeApi();
+  const tracker = createTracker({ api: fake.api, now: () => fake.state.now,
+    options: { refreshTimeoutMs: 20, retryDelayMs: 0 } });
+  try {
+    await tracker.collect();
+    const original = tracker.getSnapshot();
+    fake.api.getCalls = () => new Promise(() => {});
+    fake.state.now += 30000;
+    const keepAlive = setTimeout(() => {}, 500);
+    try { await tracker.collect(); } finally { clearTimeout(keepAlive); }
+    const after = tracker.getSnapshot();
+    assert.equal(after.quality.lastScanAt, original.quality.lastScanAt);
+    assert.equal(after.quality.positionsAt, original.quality.positionsAt);
+    assert.deepEqual(after.quality.scan, { attempted: 2, succeeded: 0, failed: 2 });
+    assert.ok(after.quality.reasons.includes('SCAN_FAILED'));
+  } finally { tracker.close(); }
+});
+
+test('shared raw call results cannot exceed the tracker byte budget', async () => {
+  const fake = fakeApi();
+  const tracker = createTracker({ api: fake.api, now: () => fake.state.now,
+    options: { callCacheMaxBytes: 64, retryDelayMs: 0 } });
+  try {
+    await tracker.collect();
+    assert.equal(tracker.getStopCalls(1), null);
+    assert.equal(tracker.getStopCalls(2), null);
+    assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+    assert.deepEqual(tracker.quality().scan, { attempted: 2, succeeded: 0, failed: 2 });
+  } finally { tracker.close(); }
+});
+
+test('the raw-call entry budget rejects an oversized stop catalog before scanning its calls', async () => {
+  const fake = fakeApi();
+  const tracker = createTracker({ api: fake.api, now: () => fake.state.now,
+    options: { callCacheMaxEntries: 1 } });
+  try {
+    await tracker.collect();
+    assert.equal(fake.counts.calls, 0);
+    assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+    assert.equal(tracker.quality().state, 'unavailable');
+    assert.equal(tracker.quality().scan.failed, 2);
   } finally { tracker.close(); }
 });

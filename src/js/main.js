@@ -22,9 +22,6 @@ async function main() {
   else showFatalError('The map library could not be loaded. Stop search and departures are still available.');
   initMapControls();
   initCommuter();
-  // initPoller polls the server's /api/buses (live-vehicles.js), which
-  // populates routes/markers/the live buses list without any user
-  // interaction (see docs/initial_plan.md).
   initPoller();
   initCountdown();
 }

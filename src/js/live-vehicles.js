@@ -1,7 +1,8 @@
-import { api } from './api.js';
+import { api, ApiError } from './api.js';
 import { store } from './appState.js';
 import { mergeLineRoutes } from './routes.js';
 import { synchronizeClock } from './clock.js';
+import { acceptRevision, classifyRevision, getTrackingState, isValidBusesSnapshot } from './tracking.js';
 
 // Buses whose next stop is further away than this are left out: they are
 // parked or between trips and not worth showing yet.
@@ -42,21 +43,63 @@ export function buildJourneyStops(vehicles) {
   return journeyStops;
 }
 
-// All journey tracking (town-wide stop scan, position fetches, next-stop
-// forecasts, stale flagging) lives on the server; see server/lib/tracker.js.
-// One request per tick returns every running bus ready to display.
-export async function refreshLiveVehicles({ signal, isCurrent = () => true } = {}) {
-  const data = await api.getBuses({ signal });
-  if (signal?.aborted || !isCurrent()) return [];
+function applySnapshotMetadata(data) {
+  synchronizeClock(data.serverTime);
+  store.set({
+    liveQuality: data.quality,
+    errors: { ...store.get().errors, vehicles: data.error ?? null },
+  });
+}
+
+// Applies one validated, in-order buses DTO (from either the HTTP poll path
+// or an SSE 'buses' event) to application state: expiry/next-stop filtering,
+// the clock offset, quality/error surfacing and the line-route cache. Pure
+// state application only - callers decide (via tracking.js) whether a given
+// payload is new enough to reach this function at all. Returns the filtered
+// vehicle list actually stored.
+export function applySnapshot(data) {
   const serverNowMs = Date.parse(data.serverTime ?? '');
   const nowMs = Number.isNaN(serverNowMs) ? Date.now() : serverNowMs;
   const vehicles = (data.vehicles ?? []).filter((bus) => isNextStopSoon(bus, nowMs) && isPositionFresh(bus, nowMs));
-  synchronizeClock(data.serverTime);
+  applySnapshotMetadata(data);
   expirePositions(vehicles, nowMs, performance.now());
-  store.set({
-    liveQuality: data.quality ?? null,
-    errors: { ...store.get().errors, vehicles: data.error ?? null },
-  });
   mergeLineRoutes(data.lineRoutes);
   return vehicles;
+}
+
+// Validates and orders-checks a buses DTO before applying it. Shared by the
+// HTTP poll path and the SSE stream so both honor the same epoch/revision
+// guarantees (see tracking.js): a malformed payload or a stale/duplicate
+// revision never reaches applySnapshot. Returns the classification plus the
+// vehicles actually applied (null when nothing was applied).
+export function acceptBusesSnapshot(data) {
+  if (!isValidBusesSnapshot(data)) return { outcome: 'invalid', vehicles: null };
+  const outcome = classifyRevision(data);
+  if (outcome === 'stale') return { outcome, vehicles: null };
+  if (outcome === 'duplicate') {
+    applySnapshotMetadata(data);
+    return { outcome, vehicles: null };
+  }
+  const vehicles = applySnapshot(data);
+  acceptRevision(data);
+  return { outcome, vehicles };
+}
+
+// All journey tracking (town-wide stop scan, position fetches, next-stop
+// forecasts, stale flagging) lives on the server; see server/lib/tracker.js.
+// One request returns every running bus ready to display; used for the
+// visible-tab initial read and the SSE delivery-watchdog HTTP fallback.
+export async function refreshLiveVehicles({ signal, isCurrent = () => true } = {}) {
+  const before = getTrackingState();
+  const data = await api.getBuses({ signal });
+  if (signal?.aborted || !isCurrent()) return { outcome: 'aborted', vehicles: null };
+  const current = getTrackingState();
+  if (current.epoch !== before.epoch && data?.epoch !== current.epoch) {
+    return { outcome: 'stale', vehicles: null };
+  }
+  const result = acceptBusesSnapshot(data);
+  if (result.outcome === 'invalid') {
+    throw new ApiError('The server returned invalid live data.', { code: 'INVALID_RESPONSE', endpoint: '/buses' });
+  }
+  return { ...result, data };
 }

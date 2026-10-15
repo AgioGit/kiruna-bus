@@ -5,14 +5,20 @@ import { config } from './lib/config.js';
 import { createBoreal } from './lib/boreal.js';
 import { createTracker } from './lib/tracker.js';
 import { createCatalog, loadCatalog } from './lib/catalog.js';
+import { createCollector } from './lib/collector.js';
+import { createStreamHub } from './lib/stream.js';
 import { createPassthrough, PASSTHROUGH_ENDPOINTS } from './lib/passthrough.js';
 import { serveStatic } from './lib/static.js';
 import { AppError } from './lib/errors.js';
 import { createTelemetry } from './lib/telemetry.js';
 import { validate } from './lib/validation.js';
-import { TtlCache } from './lib/cache.js';
 
 const POST_ENDPOINTS = new Set(['/GetStopAreas', '/GetCalls', '/FindStopArea', '/FindStopsNearLocation']);
+// Departures are served from the shared collector's per-stop call cache
+// (never a request-driven upstream lookup). A stop's cached calls remain
+// servable for up to three minutes; past that, departures report 503
+// rather than silently going stale forever.
+const DEPARTURES_MAX_AGE_MS = 3 * 60 * 1000;
 const legacyQuery = {
   '/GetConfigOptions': ['profile', 'language'], '/Autocomplete': ['query'],
   '/GetDirections': ['lineId'], '/GetMapRoute': ['routeId'], '/GetVehiclePosition': ['callId'],
@@ -69,16 +75,22 @@ function forecastDto(value) {
   if (!value) return null;
   return { plannedTime: value.plannedTime ?? null, forecastTime: value.forecastTime ?? null, quality: value.quality ?? null };
 }
-export function departuresDto(response, updatedAt) {
+// Normalizes the tracker's shared raw per-stop GetCalls entry (calls already
+// flattened, messages/cancellation preserved) into the public departures DTO.
+// `entry` is whatever `tracker.getStopCalls(id)` returned; the caller already
+// checked its age is within DEPARTURES_MAX_AGE_MS.
+export function departuresDto(entry, { nowMs, freshWithinMs }) {
   return {
-    calls: response.calls.flatMap((group) => group.calls).map((call) => ({
+    calls: entry.calls.map((call) => ({
       id: call.id, lineId: call.lineId, routeId: call.routeId ?? null, journeyId: call.journeyId,
       sequenceNumber: call.sequenceNumber, line: call.line, destination: call.destination,
       arrival: forecastDto(call.arrival), departure: forecastDto(call.departure),
     })),
-    messages: (response.messages ?? []).map(({ text, isDisturbance, affectedCalls }) =>
+    messages: (entry.messages ?? []).map(({ text, isDisturbance, affectedCalls }) =>
       ({ text, isDisturbance: Boolean(isDisturbance), affectedCalls: affectedCalls ?? [] })),
-    isStopCancelled: Boolean(response.isStopCancelled), updatedAt, state: 'fresh',
+    isStopCancelled: Boolean(entry.isStopCancelled),
+    updatedAt: new Date(entry.at).toISOString(),
+    state: !entry.failed && nowMs - entry.at <= freshWithinMs ? 'fresh' : 'stale',
   };
 }
 
@@ -88,19 +100,34 @@ export function createApplication({
   catalog = createCatalog({ snapshot: loadCatalog(settings.snapshotPath), api, telemetry, now, refreshTimeoutMs: settings.refreshTimeoutMs }),
   tracker = createTracker({ api, initialStops: catalog.get().stops, stopSource: () => catalog.get().stops,
     telemetry, now, options: { refreshTimeoutMs: settings.refreshTimeoutMs } }),
+  collector = createCollector({ tracker, catalog, telemetry, now, config: settings }),
 } = {}) {
   const passthrough = createPassthrough({ request: api.request });
-  const departures = new TtlCache({ maxEntries: 256, now });
+  const streamHub = createStreamHub({
+    collector, tracker, catalog, telemetry, now,
+    maxConnections: settings.streamMaxConnections,
+    maxConnectionsPerClient: settings.streamMaxConnectionsPerClient,
+    heartbeatMs: settings.streamHeartbeatMs,
+    slowReaderMs: settings.streamSlowReaderMs,
+    maxPendingBytes: settings.streamMaxPendingBytes,
+  });
   const clients = new Map();
   let globalBucket = { at: now(), count: 0 };
   let draining = false;
 
-  function rateLimit(req) {
+  // Shared by the per-minute rate limiter and the stream hub's per-client
+  // connection cap, so both honor the same trusted-proxy policy.
+  function clientAddress(req) {
     let address = req.socket.remoteAddress;
     if (settings.trustProxy && req.headers['x-forwarded-for']) {
       address = req.headers['x-forwarded-for'].split(',').at(-1).trim();
       if (!isIP(address)) throw badRequest('Invalid forwarded client address');
     }
+    return address;
+  }
+
+  function rateLimit(req) {
+    const address = clientAddress(req);
     const time = now();
     if (time - globalBucket.at >= 60000) globalBucket = { at: time, count: 0 };
     let bucket = clients.get(address);
@@ -163,7 +190,7 @@ export function createApplication({
       }
       route = pathname.startsWith('/api/v1/stops/') ? '/api/v1/stops/:id/departures'
         : pathname.startsWith('/api/v1/routes/') ? '/api/v1/routes/:id'
-          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby',
+          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/stream', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby',
             '/api/live', '/api/ready', '/api/status', '/api/health', '/api/buses', '/api/stops'].includes(pathname)
             || PASSTHROUGH_ENDPOINTS.has(pathname.slice(4)) ? pathname : 'unknown_api';
       if (req.method === 'OPTIONS') {
@@ -182,18 +209,29 @@ export function createApplication({
         if (pathname === '/api/live') return json(200, { ok: true });
         if (pathname === '/api/ready') return json(ready ? 200 : 503, { ready });
         if (pathname === '/api/health') return json(200, { ok: true, uptimeSeconds: Math.round(process.uptime()), ...tracker.status() });
-        return json(200, { ready, ...tracker.status(), upstream: api.status(), metrics: telemetry.snapshot() });
+        return json(200, {
+          ready, ...tracker.status(), upstream: api.status(), metrics: telemetry.snapshot(),
+          collector: collector.status(), stream: streamHub.status(),
+        });
       }
       if (draining) throw new AppError('SHUTTING_DOWN', 'Server is shutting down', { status: 503, retryAfter: 5 });
       rateLimit(req);
       if (pathname === '/api/v1/bootstrap') {
         method(['GET']); checkQuery(url);
-        void catalog.refresh();
+        // Static content: never activates the collector and never triggers
+        // its own catalog refresh -- that is the static cycle's job.
         return json(200, { ...catalog.bootstrap(), serverTime: tracker.serverTime?.() ?? new Date(now()).toISOString() }, { schema: 'bootstrap', etag: true });
       }
       if (pathname === '/api/v1/buses') {
         method(['GET']); checkQuery(url);
-        return json(200, await tracker.getSnapshot(), { schema: 'buses' });
+        collector.noteHttpActivity();
+        const snapshot = tracker.getSnapshot();
+        return json(200, { ...snapshot, epoch: collector.epoch, revision: tracker.getRevision(), catalogVersion: catalog.get().version }, { schema: 'buses' });
+      }
+      if (pathname === '/api/v1/stream') {
+        method(['GET']); checkQuery(url);
+        streamHub.handle(req, res, { address: clientAddress(req) });
+        return;
       }
       if (pathname === '/api/v1/stops') {
         method(['GET']); checkQuery(url);
@@ -208,18 +246,13 @@ export function createApplication({
         method(['GET']); checkQuery(url);
         const id = positiveId(match[1]);
         const stop = catalog.stop(id);
-        let data;
-        try {
-          const raw = await api.getCalls(stop.text);
-          data = departuresDto(raw, new Date(raw.fetchedAt ?? now()).toISOString());
-          departures.set(String(id), data, 180000);
-        } catch (error) {
-          const old = departures.get(String(id));
-          if (!old || now() - Date.parse(old.updatedAt) > 180000) throw error;
-          telemetry.log('departures_stale', { requestId, code: error.code ?? error.name });
-          data = { ...old, state: 'stale' };
+        collector.noteHttpActivity();
+        const entry = tracker.getStopCalls(stop.id);
+        const nowMs = now();
+        if (!entry || nowMs - entry.at > DEPARTURES_MAX_AGE_MS) {
+          throw new AppError('DEPARTURES_UNAVAILABLE', 'Departure information is currently unavailable.', { status: 503, retryAfter: 5 });
         }
-        return json(200, data, { schema: 'departures' });
+        return json(200, departuresDto(entry, { nowMs, freshWithinMs: settings.dynamicIntervalMs }), { schema: 'departures' });
       }
       if (pathname === '/api/v1/search' || pathname === '/api/v1/resolve') {
         method(['GET']); checkQuery(url, ['q']);
@@ -244,7 +277,20 @@ export function createApplication({
       if (pathname === '/api/buses' || pathname === '/api/stops') {
         method(['GET']); checkQuery(url);
         telemetry.count('legacyRequests');
-        return json(200, pathname.endsWith('/buses') ? await tracker.getBuses() : await tracker.getStops());
+        if (pathname.endsWith('/buses')) {
+          collector.noteHttpActivity();
+          let cached = false;
+          try { tracker.getBuses(); cached = true; }
+          catch (error) { if (!(error instanceof AppError && error.status === 503)) throw error; }
+          const refresh = collector.refreshIfDue();
+          if (cached) {
+            let timer;
+            try { await Promise.race([refresh, new Promise((resolve) => { timer = setTimeout(resolve, 8000); })]); }
+            finally { clearTimeout(timer); }
+          } else await refresh;
+          return json(200, tracker.getBuses());
+        }
+        return json(200, await tracker.getStops());
       }
       const endpoint = pathname.slice(4);
       if (PASSTHROUGH_ENDPOINTS.has(endpoint)) {
@@ -290,8 +336,14 @@ export function createApplication({
   });
   server.timeout = 30000;
   return {
-    server, tracker, catalog, api,
-    warmup() { void tracker.refresh(); },
-    shutdown() { draining = true; tracker.close(); catalog.close(); api.close(); },
+    server, tracker, catalog, api, collector,
+    shutdown() {
+      draining = true;
+      collector.close();
+      streamHub.closeAll();
+      tracker.close();
+      catalog.close();
+      api.close();
+    },
   };
 }

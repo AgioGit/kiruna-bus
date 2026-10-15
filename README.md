@@ -54,9 +54,11 @@ at the server boundary. There is no application build step or database.
   results persist when closed and the same button can retry. Selecting a
   stop closes the finder and displays its departures, with Clear and
   Save this stop controls in that departures panel.
-- Automatic refresh every 60 seconds, with a "(update in: N s)" countdown in
-  the header; polling pauses in a hidden browser tab and resumes immediately
-  when the tab becomes visible. Existing bus markers move in place rather
+- Live snapshots arrive over server-sent events after shared collection
+  cycles (30 seconds by default). If no valid snapshot arrives for 60 seconds,
+  the browser requests the cached snapshot over HTTP while reconnecting.
+  Hidden tabs close the stream and pause requests; visible tabs reconnect
+  immediately. Existing bus markers move in place rather
   than being recreated. Notices appear inline after the countdown without
   shifting the layout; long messages can be scrolled horizontally by touch
   or keyboard. Transient notices fade after 10 seconds; ongoing failures
@@ -64,7 +66,7 @@ at the server boundary. There is no application build step or database.
 - Missing buses retain their last known position and original Updated time,
   including when their calls disappear from a scan. Positions older than
   three minutes are hidden from both the map and list, even when selected;
-  they also expire between browser polls.
+  they also expire between delivered snapshots.
 - On phones and tablet portrait, a larger map comes first, followed by
   departures and live buses; tablet landscape and
   desktop use a full-height map with a compact sidebar. Bus
@@ -101,14 +103,17 @@ assets, not Boreal or external tile services.
 
 ## How live tracking works
 
-The server (`server/lib/tracker.js`) does the scanning. Startup warms live data;
-after that, requests trigger shared refreshes when data has expired. Outbound
-requests share a bounded queue and reserve capacity for interactive requests:
+The server (`server/lib/tracker.js`) does the scanning. One shared collector
+runs while an SSE client is connected or a live-data HTTP request has arrived
+within the last two minutes. Probes do not keep collection active. When activity
+ends, collection stops so the host can scale to zero. Outbound requests share a
+bounded queue:
 
-1. Every ~3 minutes it fetches calls for all known stops and groups them by
+1. Every 30 seconds by default it fetches calls for all known stops and groups them by
    `journeyId`, storing each journey's ordered stop list with
-   planned/forecast times. A failed position fetch triggers an earlier rescan.
-2. At most every 15 seconds it calls `GetVehiclePosition` for each journey's
+   planned/forecast times. Complete stop responses also supply cached departures,
+   cancellations, and disruption messages.
+2. In the same cycle it calls `GetVehiclePosition` for each journey's
    stored call id (any call id of a journey returns the same bus position).
 3. It deduplicates identical `(latitude, longitude, timestamp)` fixes into
    physical buses. Because the API also maps later journeys to the same bus,
@@ -116,21 +121,27 @@ requests share a bounded queue and reserve capacity for interactive requests:
    destination and the next two stops ("Next stop" and "Then") with their
    expected times.
 
-The page polls `/api/v1/buses` every 60 seconds and gets every bus ready to
-display in one request, including each bus's upcoming stops for the trip
-view. The town-wide `GetVehiclePositions` endpoint is not used: it returns no
+The page connects to `/api/v1/stream` and receives every bus ready to display
+after each cycle, including each bus's upcoming stops for the trip view.
+`/api/v1/buses` provides the same snapshot for startup and the 60-second
+delivery watchdog. Neither HTTP fallback nor additional viewers create
+independent upstream scans. The town-wide `GetVehiclePositions` endpoint is not used: it returns no
 buses even while the per-call position endpoint works. Stop coordinates are
 resolved by the server because `GetStopAreas` returns Kiruna stops without
 locations. The page initially uses a validated bundled basic catalog, or a newer
 compatible IndexedDB copy, without waiting for a live scan. The catalog includes
 lines, located stops, and corrected route shapes, never live positions or
-departures. It is labeled with its capture time.
+departures. It is labeled with its capture time. Static source information is
+checked every 15 minutes while clients are active; only validated complete
+catalogs replace the accepted one.
 
 Live responses report freshness and partial coverage separately from response
 creation time. Cold live requests return `503` with `Retry-After` rather than
 holding the page open for a scan. Expired positions disappear after three
-minutes even during an outage. Polling backs off on errors and pauses in hidden
-tabs. The original unversioned API remains temporarily for already-open pages.
+minutes even during an outage. Connection heartbeats do not count as data
+updates or refresh GPS timestamps. HTTP failures back off independently of
+stream reconnection. The original unversioned API remains temporarily for
+already-open pages.
 
 ## Hosting the page separately
 

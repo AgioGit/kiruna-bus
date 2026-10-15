@@ -6,6 +6,7 @@ import { loadConfig } from '../lib/config.js';
 import { loadCatalog, createCatalog } from '../lib/catalog.js';
 import { createTelemetry } from '../lib/telemetry.js';
 import { validate } from '../lib/validation.js';
+import { AppError } from '../lib/errors.js';
 
 const snapshot = loadCatalog(new URL('../data/bootstrap.json', import.meta.url));
 const settings = loadConfig({});
@@ -23,10 +24,17 @@ async function serve(t, overrides = {}) {
   };
   const catalog = createCatalog({ snapshot, api, telemetry });
   const tracker = {
-    getSnapshot: async () => { throw new Error('not used'); },
+    getSnapshot: () => { throw new Error('not used'); },
+    getBuses: () => { throw new Error('not used'); },
+    getStopCalls: () => null,
+    getRevision: () => 0,
+    getLineRoutes: () => ({}),
+    collect: async () => {},
+    serverTime: () => new Date().toISOString(),
     status: () => ({ journeys: 0 }), close() {}, ...overrides.tracker,
   };
-  const app = createApplication({ settings: { ...settings, ...overrides.settings }, telemetry, catalog, tracker, api });
+  const app = createApplication({ settings: { ...settings, ...overrides.settings }, telemetry, catalog, tracker, api,
+    now: overrides.now });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   t.after(async () => { app.shutdown(); app.server.closeAllConnections(); await new Promise((resolve) => app.server.close(resolve)); });
@@ -78,10 +86,11 @@ test('HTTP validation rejects invalid methods, query, media, coordinates and ove
 test('local search, resolve, nearby and normalized departure disruptions preserve semantics', async (t) => {
   const stop = snapshot.stops[0];
   const iso = new Date().toISOString();
-  const { base } = await serve(t, { api: { getCalls: async () => ({
-    calls: [{ calls: [{ id: 'a', lineId: snapshot.lines[0].id, journeyId: 1, sequenceNumber: 1,
-      line: 'Line', destination: 'Town', departure: { plannedTime: iso, forecastTime: iso } }] }],
+  const { base } = await serve(t, { tracker: { getStopCalls: (id) => (id !== stop.id ? null : {
+    calls: [{ id: 'a', lineId: snapshot.lines[0].id, journeyId: 1, sequenceNumber: 1,
+      line: 'Line', destination: 'Town', departure: { plannedTime: iso, forecastTime: iso } }],
     messages: [{ text: 'Disruption', isDisturbance: true, affectedCalls: ['a'] }], isStopCancelled: true,
+    at: Date.now(),
   }) } });
   const results = await (await fetch(`${base}/api/v1/search?q=${encodeURIComponent(stop.text)}`)).json();
   assert.deepEqual(results, [stop.text]);
@@ -109,7 +118,70 @@ test('configuration rejects invalid input instead of silently using defaults', (
   for (const env of [
     { PORT: 'oops' }, { PORT: '-1' }, { UPSTREAM_TIMEOUT_MS: '0' }, { BOREAL_BASE: 'file:///tmp' },
     { ALLOWED_ORIGINS: 'https://example.com/path' }, { TRUST_PROXY: 'maybe' }, { SNAPSHOT_PATH: '' },
+    { DYNAMIC_INTERVAL_MS: '29999' }, { DYNAMIC_INTERVAL_MS: '60001' },
+    { STREAM_HEARTBEAT_MS: '999' }, { STREAM_HEARTBEAT_MS: '15001' },
+    { STREAM_MAX_CONNECTIONS: '0' }, { STREAM_MAX_PENDING_BYTES: '0' },
   ]) assert.throws(() => loadConfig(env));
+  assert.equal(loadConfig({ DYNAMIC_INTERVAL_MS: '60000' }).dynamicIntervalMs, 60000);
+  assert.equal(loadConfig({ DYNAMIC_INTERVAL_MS: '30000' }).dynamicIntervalMs, 30000);
+});
+
+test('basic resources and probes do not activate the source collector', async (t) => {
+  let collections = 0;
+  const app = await serve(t, { tracker: { collect: async () => { collections++; } } });
+  for (const path of ['/api/live', '/api/ready', '/api/status', '/api/v1/bootstrap', '/api/v1/stops']) {
+    assert.equal((await fetch(app.base + path)).status, 200);
+  }
+  await new Promise(setImmediate);
+  assert.equal(collections, 0);
+  assert.equal(app.collector.isActive(), false);
+});
+
+test('legacy cold reads wait on one shared collection and preserve the unversioned response shape', async (t) => {
+  let ready = false, collections = 0;
+  const data = {
+    generatedAt: new Date().toISOString(), serverTime: new Date().toISOString(), vehicles: [], lineRoutes: {},
+    quality: { state: 'fresh', reasons: [], scan: { attempted: 1, succeeded: 1, failed: 0 },
+      positions: { attempted: 0, succeeded: 0, failed: 0 }, lastScanAt: null, positionsAt: null, clockSynchronized: true },
+  };
+  const read = () => {
+    if (!ready) throw new AppError('WARMING_UP', 'Warming up', { status: 503 });
+    return data;
+  };
+  const app = await serve(t, { tracker: {
+    getBuses: read, getSnapshot: read, collect: async () => { collections++; ready = true; },
+  } });
+  const responses = await Promise.all(Array.from({ length: 6 }, () => fetch(`${app.base}/api/buses`)));
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.epoch, undefined);
+    assert.deepEqual(body.vehicles, []);
+  }
+  assert.equal(collections, 1);
+  const versioned = validate('buses', await (await fetch(`${app.base}/api/v1/buses`)).json());
+  assert.equal(versioned.epoch, app.collector.epoch);
+  assert.equal(collections, 1);
+});
+
+test('failed-stop departures preserve source time and expire only after the exact three-minute boundary', async (t) => {
+  let time = Date.parse('2026-01-01T12:00:00Z');
+  const at = time;
+  const app = await serve(t, { now: () => time, tracker: {
+    getStopCalls: () => ({ calls: [], messages: [], isStopCancelled: true, at, failed: true }),
+  } });
+  const url = `${app.base}/api/v1/stops/${snapshot.stops[0].id}/departures`;
+  const retained = validate('departures', await (await fetch(url)).json());
+  assert.equal(retained.state, 'stale');
+  assert.equal(retained.updatedAt, new Date(at).toISOString());
+  assert.equal(retained.isStopCancelled, true);
+  time += 180000;
+  assert.equal((await fetch(url)).status, 200);
+  time++;
+  const expired = await fetch(url);
+  assert.equal(expired.status, 503);
+  assert.equal(expired.headers.get('retry-after'), '5');
+  assert.equal((await expired.json()).error.code, 'DEPARTURES_UNAVAILABLE');
 });
 
 test('draining rejects readiness without marking the process dead', async (t) => {

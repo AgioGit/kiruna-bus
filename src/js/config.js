@@ -33,7 +33,7 @@ export function applyCatalog(catalog, source) {
       ...(selectedStop ? { selectedStop } : {}),
     } : {}),
     catalogInfo: { source, capturedAt: catalog.capturedAt, version: catalog.version },
-    errors: { ...store.get().errors, config: null },
+    errors: { ...store.get().errors, config: null, stops: null, lines: null },
   });
   return true;
 }
@@ -46,6 +46,7 @@ export async function refreshBootstrap({ signal, isCurrent = () => true, force =
   if (!isCatalog(data?.catalog)) throw new ApiError('Basic map information is invalid.', { code: 'INVALID_CATALOG' });
   synchronizeClock(data.serverTime);
   if (applyCatalog(data.catalog, data.source)) await writeCachedCatalog(data.catalog).catch(storageError);
+  return data;
 }
 
 export async function loadConfig() {

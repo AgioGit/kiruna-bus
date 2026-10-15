@@ -136,7 +136,11 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
   async function request(path, options = {}) {
     const key = cacheKey(path, options);
     const ttl = ttlByPath[path];
-    const hit = ttl ? cache.get(key) : undefined;
+    // `fresh` bypasses the cache *read* so scheduled collector cycles always perform a genuine
+    // upstream check (per-path TTLs would otherwise outlive the 30s/15min cycle cadence and mask
+    // staleness). The result is still written to cache afterward for other, non-fresh callers.
+    const useCache = ttl && !options.fresh;
+    const hit = useCache ? cache.get(key) : undefined;
     if (hit) {
       telemetry.count('cacheHits');
       telemetry.log('upstream_cache', { endpoint: path, outcome: 'HIT' });
@@ -144,7 +148,7 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
     }
     telemetry.count('cacheMisses');
     let pending = inflight.get(key);
-    telemetry.log('upstream_cache', { endpoint: path, outcome: pending ? 'COALESCED' : ttl ? 'MISS' : 'BYPASS' });
+    telemetry.log('upstream_cache', { endpoint: path, outcome: pending ? 'COALESCED' : useCache ? 'MISS' : 'BYPASS' });
     if (!pending) {
       pending = load(path, options).then((res) => {
         if (res.status === 200 && ttl) cache.set(key, res, ttl);
@@ -154,7 +158,7 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
       const clear = () => inflight.delete(key);
       pending.then(clear, clear);
     }
-    return { ...(await withSignal(pending, options.signal)), cache: ttl ? 'MISS' : 'BYPASS' };
+    return { ...(await withSignal(pending, options.signal)), cache: useCache ? 'MISS' : 'BYPASS' };
   }
 
   async function json(path, options = {}) {

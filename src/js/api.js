@@ -1,5 +1,10 @@
 const BASE_URL = (globalThis.BOREAL_CONFIG?.apiBase || '/api').replace(/\/+$/, '') + '/v1';
 
+// Exposed so the SSE stream (opened directly via native EventSource, not the
+// request() helper below) can target the same cross-origin-aware base URL
+// as every other endpoint.
+export const apiBase = BASE_URL;
+
 export class ApiError extends Error {
   constructor(message, { endpoint, status, cause, code, retryAfter } = {}) {
     super(message, { cause });

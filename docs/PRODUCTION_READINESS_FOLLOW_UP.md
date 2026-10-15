@@ -2,13 +2,19 @@
 
 Status: future roadmap, not approved implementation scope.
 
+Exception: on 2026-10-15 the user approved the activity-gated collector and SSE
+work described in section 6. Its approved scope is recorded in the
+[readiness-plan amendment](PRODUCTION_READINESS_PLAN.md#approved-live-delivery-amendment-2026-10-15).
+The other roadmap items remain future work.
+
 Prerequisite: complete and release the
 [production-readiness plan](PRODUCTION_READINESS_PLAN.md).
 
 This document covers improvements to consider after the first production-ready
 release. It does not move required work out of that plan or change the agreed
-architecture: one scale-to-zero container, bundled basic information plus browser
-cache, native Node HTTP, 60-second polling, and three-minute position expiry.
+architecture: one scale-to-zero-capable container, bundled basic information plus browser
+cache, native Node HTTP, and three-minute position expiry. The approved SSE
+amendment replaces the original 60-second polling design only.
 
 ## Priorities
 
@@ -19,7 +25,7 @@ cache, native Node HTTP, 60-second polling, and three-minute position expiry.
 | Next | Detect upstream drift and keep bundled data current | The validated snapshot generator and application schemas are in place. |
 | Next | Strengthen release assurance | Baseline CI and immutable manual releases are working. |
 | Conditional | Reduce cold-start impact further | Measured waiting time is unacceptable to users. |
-| Conditional | Improve live-update frequency or use server push | 60-second updates are demonstrably insufficient. |
+| Approved | Activity-gated collection and server push | User approved implementation on 2026-10-15; validate locally and verify hosting ingress before release. |
 | Conditional | Add shared state and multiple replicas | One instance cannot meet agreed capacity or availability needs. |
 | Conditional | Expand types, provider support, or retained data | A concrete maintenance or product requirement justifies it. |
 
@@ -149,27 +155,45 @@ initial decision to keep one container remains in force until changed.
 Done when: an approved option meets an agreed startup target at an accepted
 cost, including first-time visitors rather than only returning ones.
 
-## 6. Revisit update frequency before introducing push
+## 6. Activity-gated collection and push (approved amendment)
 
-If users need faster movement updates, compare a modest polling reduction with
-SSE using measured traffic, hosting cost, and provider limits.
+Implemented and locally verified; production release checks remain open. See
+the [amendment verification record](PRODUCTION_READINESS_PLAN.md#approved-live-delivery-amendment-2026-10-15).
 
-Faster visible-tab polling is the smaller change, but increases HTTP request
-volume and can increase upstream work when caches expire. It cannot make
-provider GPS samples newer.
+The approved implementation uses one shared collector while clients are
+active: calls and vehicle positions every 30 seconds by default (configurable
+to 60), and static information every 15 minutes. An open SSE connection or
+live HTTP activity within 120 seconds keeps collection active. Probes do not.
+Once idle, collection stops so the host can scale to zero.
 
-SSE is a reasonable push candidate for one-way updates. It introduces connection
-limits, proxy idle timeouts, reconnection, backpressure, snapshot resynchronization,
-and graceful deployment draining. Open connections may also keep an instance
-active and change scale-to-zero costs. Use a full snapshot on initial connection
-or recovery; do not assume a client received every event.
+Each dynamic cycle publishes a full bus snapshot with source freshness,
+coverage, an ordering revision, and catalog version. A browser that receives no
+valid snapshot for 60 seconds reads the HTTP cache while reconnecting.
+Heartbeats and status-only events do not reset this delivery watchdog. Hidden
+tabs close streams and pause requests; GPS expiry still runs independently.
+
+Keep collection independent of viewer count, prevent overlapping cycles, reuse
+the call cache for departures and catalog route discovery, and preserve the
+existing three-minute position expiry. Genuine 15-minute static source checks
+must not be hidden behind the previous one-hour upstream TTL.
+
+SSE requires bounded connections/backpressure, proxy idle-timeout and buffering
+checks, reconnect resynchronization, and graceful deployment draining. Active
+connections can keep hosting resources active; stopping the collector when
+idle permits scale-to-zero but does not guarantee a hosting cost reduction.
+Use a full snapshot on initial connection or recovery.
 
 Only introduce deltas or compression after payload measurements justify them.
 WebSockets add little value unless a real bidirectional requirement appears.
 
-Done when: the chosen approach improves observed data age without violating
-upstream budgets, deployment behavior, or the agreed expiry policy. Keep
-60-second polling until this change is approved.
+Done when: local unit, HTTP, browser, and container checks demonstrate the
+collector/push/fallback lifecycle, and release checks confirm acceptable source
+traffic, ingress behavior, and idle scale-down. With the previously observed
+44 stops and 15 position lookups, a full dynamic cycle is approximately 59
+upstream requests before retries: about 118/minute at 30 seconds or 59/minute
+at 60 seconds, excluding static checks and legacy traffic. Confirm acceptable
+provider usage before deployment; faster collection cannot make provider GPS
+samples newer.
 
 ## 7. Add shared state before increasing replica count
 

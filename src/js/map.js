@@ -406,7 +406,7 @@ function vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading) {
     html: `<div class="${markerClasses.join(' ')}" style="${markerStyle}">
       <svg class="vehicle-bus" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <path fill="currentColor" d="M7 3h10a3 3 0 0 1 3 3v12a2 2 0 0 1-2 2v1h-3v-1H9v1H6v-1a2 2 0 0 1-2-2V6a3 3 0 0 1 3-3Z" />
-        <g fill="var(--vehicle-color)">
+        <g fill="var(--color-surface)">
           <rect x="8" y="4.5" width="8" height="1.5" rx=".75" />
           <rect x="6" y="7.5" width="12" height="6" rx="1" />
           <circle cx="7.5" cy="16.5" r="1.25" />

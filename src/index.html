@@ -24,7 +24,15 @@
   <header class="app-header">
     <div class="header-title">
       <h1>Kiruna buses</h1>
-      <p>Live map and departures</p>
+      <button id="information-toggle" class="information-toggle" type="button" aria-label="About this page" aria-expanded="false" aria-controls="app-information">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v2"/></svg>
+      </button>
+      <button id="theme-toggle" class="theme-toggle" type="button">Dark</button>
+    </div>
+    <section id="app-information" class="header-information" aria-labelledby="information-heading" hidden>
+      <h2 id="information-heading">About this page</h2>
+      <p>All data is based on the data available through <a href="https://lokaltrafikenkiruna.se/realtidsinformation/" target="_blank" rel="noopener noreferrer">Lokaltrafiken Kiruna's real-time information page</a>.</p>
+      <p>This page is not affiliated with either Kiruna Kommun or Boreal. It is provided as is, primarily for educational purposes. Data may be delayed or inaccurate.</p>
       <div class="header-updates">
         <span id="refresh-countdown" class="refresh-countdown" role="timer" aria-live="off"></span>
         <div class="header-notices" role="group" aria-label="Update notices (scroll for more)" tabindex="0">
@@ -32,8 +40,7 @@
           <span id="status-banner" class="header-notice" role="status" aria-live="polite" hidden></span>
         </div>
       </div>
-      <button id="theme-toggle" class="theme-toggle" type="button">Dark</button>
-    </div>
+    </section>
   </header>
 
   <main class="app-layout">

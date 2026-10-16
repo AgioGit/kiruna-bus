@@ -63,10 +63,14 @@ at the server boundary. There is no application build step or database.
   the browser requests the cached snapshot over HTTP while reconnecting.
   Hidden tabs close the stream and pause requests; visible tabs reconnect
   immediately. Existing bus markers move in place rather
-  than being recreated. Notices appear inline after the countdown without
-  shifting the layout; long messages can be scrolled horizontally by touch
-  or keyboard. Transient notices fade after 10 seconds; ongoing failures
-  remain visible. Routine counts of expired GPS reports are not shown.
+  than being recreated. The header's information icon expands a disclaimer
+  with the data source, non-affiliation with Kiruna Kommun and Boreal, and
+  the page's as-is, primarily educational purpose. Connection status and
+  update notices are also available inside this initially collapsed panel.
+  Notices appear inline without shifting the layout; long messages can be
+  scrolled horizontally by touch or keyboard. Transient notices fade after
+  10 seconds; ongoing failures remain available. Routine counts of expired
+  GPS reports are not shown.
 - Missing buses retain their last known position and original Updated time,
   including when their calls disappear from a scan. Positions older than
   three minutes are hidden from both the map and list, even when selected;

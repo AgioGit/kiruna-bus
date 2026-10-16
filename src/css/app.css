@@ -90,6 +90,7 @@ body {
 }
 
 .app-header {
+  min-width: 0;
   padding: 0.8rem 1rem;
   background: var(--color-header);
   color: #fff;
@@ -97,7 +98,7 @@ body {
 
 .header-title {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 0.25rem 0.85rem;
 }
@@ -108,10 +109,29 @@ body {
   letter-spacing: -0.02em;
 }
 
-.header-title > p {
-  margin: 0;
+.header-information {
+  margin-top: 0.65rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.25);
   color: #c7d7ea;
   font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.header-information h2 {
+  margin: 0 0 0.4rem;
+  color: #fff;
+  font-size: 1rem;
+}
+
+.header-information p {
+  max-width: 70ch;
+  margin: 0 0 0.6rem;
+}
+
+.header-information a {
+  color: #fff;
+  text-underline-offset: 0.15em;
 }
 
 .header-updates {
@@ -888,8 +908,8 @@ button.vehicle-card {
   }
 }
 
+.information-toggle,
 .theme-toggle {
-  margin-left: auto;
   min-width: 44px;
   min-height: 32px;
   padding: 0.2rem 0.6rem;
@@ -902,8 +922,22 @@ button.vehicle-card {
   cursor: pointer;
 }
 
+.information-toggle {
+  display: grid;
+  place-items: center;
+}
+
+.information-toggle:hover,
+.information-toggle[aria-expanded="true"],
 .theme-toggle:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.information-toggle:focus-visible,
+.theme-toggle:focus-visible,
+.header-information a:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
 }
 
 /* OSM tiles are light-only, so the dark theme inverts the tile pane only;
@@ -986,27 +1020,6 @@ button.vehicle-card {
     min-height: 12rem;
     overflow-y: auto;
     overscroll-behavior: contain;
-  }
-}
-
-@media (max-width: 700px) {
-  .header-title {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .header-title > p {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .header-updates {
-    grid-column: 1 / -1;
-    grid-row: 3;
-  }
-
-  .theme-toggle {
-    grid-column: 2;
-    grid-row: 1 / 3;
   }
 }
 

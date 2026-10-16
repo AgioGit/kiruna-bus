@@ -12,6 +12,7 @@ const TRANSIENT_ERRORS = new Set(['stopNotFound', 'cache']);
 const statusElements = new WeakMap();
 
 export function initUi() {
+  wireInformationToggle();
   wireSearch();
   wireVehicleCardClicks();
   store.subscribe((state, prev) => {
@@ -36,6 +37,24 @@ export function initUi() {
   renderVehicleCards(store.get());
   renderArrivals(store.get());
   renderStatus(store.get());
+}
+
+function wireInformationToggle() {
+  const button = document.getElementById('information-toggle');
+  const panel = document.getElementById('app-information');
+  if (!button || !panel) return;
+
+  const setOpen = (open) => {
+    panel.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+  };
+  button.addEventListener('click', () => setOpen(panel.hidden));
+  button.closest('.app-header').addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || panel.hidden) return;
+    event.preventDefault();
+    setOpen(false);
+    button.focus({ preventScroll: true });
+  });
 }
 
 // Keeps the search box showing whichever stop is currently selected, so a

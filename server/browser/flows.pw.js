@@ -144,6 +144,7 @@ test('transient search failures fade after ten seconds without hiding an ongoing
   }));
   await page.goto('/');
   await expect(page.locator('#live-buses')).toContainText('does not mean no buses');
+  await page.getByRole('button', { name: 'About this page', exact: true }).click();
   await page.evaluate(async () => (await import('/js/poller.js')).pausePolling());
   await page.locator('#map-stops-toggle').click();
   await page.locator('#stop-search').fill('Center');
@@ -162,11 +163,58 @@ test('transient search failures fade after ten seconds without hiding an ongoing
 });
 
 for (const width of [1280, 375, 320]) {
+  test(`information icon expands the disclaimer and diagnostics at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto('/');
+    await expect(page.locator('#live-buses')).toContainText('does not mean no buses');
+    const toggle = page.getByRole('button', { name: 'About this page', exact: true });
+    const panel = page.getByRole('region', { name: 'About this page', exact: true });
+    const themeHeight = await page.locator('#theme-toggle').evaluate((element) => element.getBoundingClientRect().height);
+    expect(await toggle.evaluate((element) => element.getBoundingClientRect().height)).toBe(themeHeight);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('#app-information')).toBeHidden();
+    await expect(page.locator('#refresh-countdown')).toBeHidden();
+    await expect(page.locator('#status-banner')).toBeHidden();
+    await expect(page.getByText('Live map and departures', { exact: true })).toHaveCount(0);
+    const headerHeight = await page.locator('.app-header').evaluate((element) => element.getBoundingClientRect().height);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText('All data is based on the data available through');
+    const source = panel.getByRole('link', { name: "Lokaltrafiken Kiruna's real-time information page" });
+    await expect(source).toHaveAttribute('href', 'https://lokaltrafikenkiruna.se/realtidsinformation/');
+    await expect(panel).toContainText('not affiliated with either Kiruna Kommun or Boreal');
+    await expect(panel).toContainText('provided as is, primarily for educational purposes');
+    await expect(page.locator('#refresh-countdown')).toBeVisible();
+    await expect(page.locator('#status-banner')).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(panel).toBeHidden();
+    expect(await page.locator('.app-header').evaluate((element) => element.getBoundingClientRect().height)).toBe(headerHeight);
+    await toggle.focus();
+    await page.keyboard.press('Enter');
+    await expect(panel).toBeVisible();
+    await source.focus();
+    await page.keyboard.press('Escape');
+    await expect(toggle).toBeFocused();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(panel).toBeHidden();
+    await page.keyboard.press('Space');
+    await expect(panel).toBeVisible();
+    await page.locator('#theme-toggle').click();
+    await expect(panel).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+  });
+
   test(`inline update notices do not shift the layout at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
     await page.clock.install();
     await page.goto('/');
     await expect(page.locator('#live-buses')).toContainText('does not mean no buses');
+    await page.getByRole('button', { name: 'About this page', exact: true }).click();
     await page.evaluate(async () => {
       (await import('/js/poller.js')).pausePolling();
       const { store } = await import('/js/appState.js');
@@ -241,6 +289,7 @@ for (const width of [1280, 375, 320]) {
 test('map-library failures share the inline notice area with live status', async ({ page }) => {
   await page.route('**/leaflet.js', (route) => route.abort());
   await page.goto('/');
+  await page.getByRole('button', { name: 'About this page', exact: true }).click();
   const fatal = page.locator('.header-updates #app-error');
   await expect(fatal).toBeVisible();
   await expect(fatal).toContainText('The map library could not be loaded');

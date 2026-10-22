@@ -1,8 +1,8 @@
 # Boreal bus server
 
-Native Node HTTP server with Ajv schema validation. Node 22.11+ is required;
-Docker and CI use Node 22 LTS. No database, application build, or external cache
-service is needed.
+Native Node HTTP server with Ajv schema validation. Use a security-patched
+Node 22 LTS release (22.23.4 or newer); Docker and CI use Node 22.23.4.
+No database, application build, or external cache service is needed.
 
 ```powershell
 cd server
@@ -246,6 +246,14 @@ CI checks pull requests and relevant pushes. Publication on main/manual runs
 requires unit/HTTP and browser checks plus a smoke test of the exact built
 image with Boreal unavailable. The runtime image installs locked production
 dependencies only and runs as the non-root `node` user.
+
+The Docker base is pinned by version and digest to Node 22.23.4 on Alpine
+3.24.3, including OpenSSL 3.5.9, musl 1.2.6-r3, and zlib 1.3.2-r1.
+These versions include the Node, OpenSSL, musl, and zlib security fixes
+reviewed on 2026-10-22. For future security updates, update the base tag and
+digest together, keep CI's Node version aligned, and rebuild and verify a new
+image before deployment. Restarting an existing image does not update its
+runtime or OS packages.
 
 For the current Azure Container Apps rollout, preserve minimum replicas `1`
 and maximum `1`, as explicitly requested for this deployment. The collector

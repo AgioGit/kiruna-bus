@@ -2,9 +2,10 @@ import { store } from './appState.js';
 import { apiBase } from './api.js';
 import { fetchCallsForSelectedStop } from './calls.js';
 import { acceptBusesSnapshot, refreshLiveVehicles } from './live-vehicles.js';
-import { isValidTrackingStatus, classifyRevision, acceptRevision } from './tracking.js';
+import { isValidTrackingStatus, classifyRevision, acceptRevision, getTrackingState } from './tracking.js';
 import { refreshStopLocations } from './stop-locations.js';
 import { refreshBootstrap } from './config.js';
+import { CLOCK_SAMPLE_MAX_AGE, now as clockNow, synchronizeClock } from './clock.js';
 
 // A visible tab opens one SSE connection (GET /api/v1/stream) that receives
 // a full buses snapshot every dynamic collector cycle (~30s) plus
@@ -16,6 +17,8 @@ import { refreshBootstrap } from './config.js';
 // off on failure) and force a bounded stream reconnect, without ever running
 // two EventSource instances at once.
 const WATCHDOG_MS = 60000;
+const CLOCK_DISCREPANCY_MS = 10000;
+const CLOCK_RESYNC_INTERVAL_MS = 60000;
 
 let eventSource = null;
 let streamGeneration = 0;
@@ -31,6 +34,10 @@ let catalogRefreshPromise = null;
 let lifecycleAbort = null, basicRecoveryTimer = null;
 let lastFetchedCatalogVersion = null;
 let deliveries = 0;
+let clockResyncPending = null, clockResyncTimer = null, clockResyncNotBefore = -Infinity;
+let httpRetryNotBefore = -Infinity, lastResolvedClockDiscrepancy = null;
+let clockDiscrepancySequence = 0;
+let lastStreamServerTime = null;
 
 export function getLiveVehiclesSchedule() { return { connected, nextFallbackAt }; }
 
@@ -60,6 +67,114 @@ function closeStream() {
   eventSource?.close();
   eventSource = null;
   connected = false;
+}
+
+function recordStreamTime(data, outcome) {
+  const timestamp = Date.parse(data.serverTime);
+  lastStreamServerTime = outcome === 'duplicate' && lastStreamServerTime != null
+    ? Math.max(lastStreamServerTime, timestamp) : timestamp;
+}
+
+function respectHttpRetryAfter(error) {
+  if (Number.isFinite(error?.retryAfter) && error.retryAfter > 0) {
+    httpRetryNotBefore = Math.max(httpRetryNotBefore, performance.now() + error.retryAfter);
+  }
+}
+
+function httpRetryWait() {
+  return Math.max(0, httpRetryNotBefore - performance.now());
+}
+
+function deferHttpRead(token, callback, wait) {
+  clearWatchdog();
+  clearFallbackTimer();
+  nextFallbackAt = Date.now() + wait;
+  fallbackTimer = setTimeout(() => {
+    fallbackTimer = null;
+    if (!paused && token === streamGeneration) callback(token);
+  }, Math.min(wait, 2147483647));
+  fallbackTimer?.unref?.();
+}
+
+function sameDiscrepancy(a, b) {
+  return a && b && a.epoch === b.epoch && a.revision === b.revision && a.serverTime === b.serverTime;
+}
+
+function confirmClockDiscrepancy(data, target, requestSequence) {
+  const age = data?.[CLOCK_SAMPLE_MAX_AGE];
+  const timestamp = Date.parse(data?.serverTime);
+  if (!target || requestSequence < target.sequence || data?.epoch !== target.epoch || !Number.isFinite(age) || age < 0
+      || !Number.isFinite(timestamp) || timestamp < target.serverTime
+      || clockNow() > timestamp + age + CLOCK_DISCREPANCY_MS
+      || clockNow() < timestamp - CLOCK_DISCREPANCY_MS) return false;
+  lastResolvedClockDiscrepancy = { ...target, clockOffset: clockNow() - performance.now() };
+  if (sameDiscrepancy(clockResyncPending, target)) {
+    clockResyncPending = null;
+    clearTimeout(clockResyncTimer);
+    clockResyncTimer = null;
+  }
+  return true;
+}
+
+// A healthy stream can carry a corrected server clock while an older
+// bootstrap anchored the client in the future. SSE timestamps may also be
+// delayed, so confirm a substantial discrepancy with the cached HTTP read.
+function requestClockResync(data, token) {
+  if (!store.get().clockSynchronized || clockNow() - Date.parse(data.serverTime) <= CLOCK_DISCREPANCY_MS) {
+    clockResyncPending = null;
+    clearTimeout(clockResyncTimer);
+    clockResyncTimer = null;
+    return;
+  }
+  const discrepancy = { epoch: data.epoch, revision: data.revision, serverTime: Date.parse(data.serverTime) };
+  if (sameDiscrepancy(discrepancy, lastResolvedClockDiscrepancy)
+      && Math.abs(clockNow() - performance.now() - lastResolvedClockDiscrepancy.clockOffset) <= CLOCK_DISCREPANCY_MS) return;
+  clockResyncPending = { ...discrepancy, sequence: ++clockDiscrepancySequence };
+  startClockResync(token);
+}
+
+function startClockResync(token) {
+  if (!clockResyncPending || paused || token !== streamGeneration || liveAbort || clockResyncTimer != null) return;
+  const wait = Math.max(clockResyncNotBefore, httpRetryNotBefore) - performance.now();
+  if (wait > 0) {
+    clockResyncTimer = setTimeout(() => {
+      clockResyncTimer = null;
+      startClockResync(token);
+    }, Math.min(wait, 2147483647));
+    clockResyncTimer?.unref?.();
+    return;
+  }
+  const discrepancy = clockResyncPending;
+  clockResyncPending = null;
+  const requestSequence = clockDiscrepancySequence;
+  clockResyncNotBefore = performance.now() + CLOCK_RESYNC_INTERVAL_MS;
+  const controller = new AbortController();
+  liveAbort = controller;
+  const isCurrent = () => !controller.signal.aborted && !paused && token === streamGeneration;
+  void refreshLiveVehicles({ signal: controller.signal, isCurrent }).then(({ outcome, data }) => {
+    if (!isCurrent()) return;
+    if (outcome === 'stale' && data?.epoch === getTrackingState().epoch
+        && Number.isFinite(data[CLOCK_SAMPLE_MAX_AGE]) && data[CLOCK_SAMPLE_MAX_AGE] >= 0
+        && lastStreamServerTime != null && Date.parse(data.serverTime) >= lastStreamServerTime) {
+      synchronizeClock(data.serverTime, { maxAgeMs: data[CLOCK_SAMPLE_MAX_AGE] });
+      if (!confirmClockDiscrepancy(data, discrepancy, requestSequence)) clockResyncPending ??= discrepancy;
+    } else if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') {
+      if (!confirmClockDiscrepancy(data, discrepancy, requestSequence)
+          && data && clockNow() - Date.parse(data.serverTime) > CLOCK_DISCREPANCY_MS) {
+        clockResyncPending ??= discrepancy;
+      }
+      if (data) afterSnapshot(data, outcome);
+      armWatchdog(token);
+    } else {
+      clockResyncPending ??= discrepancy;
+    }
+  }).catch((error) => {
+    // Keep healthy stream state; a later discrepancy can trigger a throttled retry.
+    if (error?.name !== 'AbortError') respectHttpRetryAfter(error);
+  }).finally(() => {
+    if (liveAbort === controller) liveAbort = null;
+    if (isCurrent()) startClockResync(token);
+  });
 }
 
 // Fetches the bootstrap bundle when a snapshot/status reports a different
@@ -140,6 +255,7 @@ function handleTrackingStatusPayload(data) {
 async function onWatchdogFired(token) {
   if (token !== streamGeneration || paused) return;
   clearWatchdog(); // this firing consumed the timer
+  if (liveAbort) { armWatchdog(token); return; }
   // Bounded reconnect up front: exactly one fresh EventSource per watchdog
   // fire (handles a silently stuck stream - heartbeats but no data, no
   // error), never two connections at once. Bumping the generation first
@@ -148,11 +264,21 @@ async function onWatchdogFired(token) {
   // abandon.
   streamGeneration++;
   const next = streamGeneration;
+  clearTimeout(clockResyncTimer);
+  clockResyncTimer = null;
   closeStream();
   openStream(next); // arms its own fresh watchdog immediately
 
+  const retryWait = httpRetryWait();
+  if (retryWait > 0) {
+    deferHttpRead(next, onWatchdogFired, retryWait);
+    startClockResync(next);
+    return;
+  }
+
   const controller = new AbortController();
   liveAbort = controller;
+  const requestSequence = clockDiscrepancySequence;
   const signal = controller.signal;
   const isCurrent = () => !signal.aborted && !paused && next === streamGeneration;
   const startedAtDelivery = deliveries;
@@ -160,10 +286,12 @@ async function onWatchdogFired(token) {
     const { outcome, data } = await refreshLiveVehicles({ signal, isCurrent });
     if (!isCurrent()) return;
     if (outcome !== 'aborted') {
+      if (outcome !== 'stale') confirmClockDiscrepancy(data, clockResyncPending, requestSequence);
       if (data) afterSnapshot(data, outcome);
       if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') armWatchdog(next);
     }
   } catch (error) {
+    if (error?.name !== 'AbortError') respectHttpRetryAfter(error);
     if (isCurrent() && error.name !== 'AbortError' && deliveries === startedAtDelivery) {
       const wait = failureDelay(++liveFailures, error.retryAfter);
       store.set({
@@ -178,6 +306,7 @@ async function onWatchdogFired(token) {
     }
   } finally {
     if (liveAbort === controller) liveAbort = null;
+    if (isCurrent()) startClockResync(next);
   }
 }
 
@@ -187,8 +316,14 @@ async function onWatchdogFired(token) {
 // watchdog, just without ever touching eventSource.
 async function runFallbackCycle(token) {
   if (token !== streamGeneration || paused) return;
+  const retryWait = httpRetryWait();
+  if (retryWait > 0) {
+    deferHttpRead(token, runFallbackCycle, retryWait);
+    return;
+  }
   const controller = new AbortController();
   liveAbort = controller;
+  const requestSequence = clockDiscrepancySequence;
   const signal = controller.signal;
   const isCurrent = () => !signal.aborted && !paused && token === streamGeneration;
   let wait = WATCHDOG_MS;
@@ -196,9 +331,11 @@ async function runFallbackCycle(token) {
     const { outcome, data } = await refreshLiveVehicles({ signal, isCurrent });
     if (!isCurrent()) return;
     if (outcome !== 'aborted') {
+      if (outcome !== 'stale') confirmClockDiscrepancy(data, clockResyncPending, requestSequence);
       if (data) afterSnapshot(data, outcome);
     }
   } catch (error) {
+    if (error?.name !== 'AbortError') respectHttpRetryAfter(error);
     if (isCurrent() && error.name !== 'AbortError') {
       wait = failureDelay(++liveFailures, error.retryAfter);
       store.set({
@@ -208,6 +345,7 @@ async function runFallbackCycle(token) {
     }
   } finally {
     if (liveAbort === controller) liveAbort = null;
+    if (isCurrent()) startClockResync(token);
   }
   if (!isCurrent()) return;
   nextFallbackAt = Date.now() + wait;
@@ -236,7 +374,11 @@ function openStream(token) {
       return;
     }
     const outcome = handleBusesPayload(data);
-    if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') armWatchdog(token);
+    if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') {
+      recordStreamTime(data, outcome);
+      requestClockResync(data, token);
+      armWatchdog(token);
+    }
   });
   source.addEventListener('tracking-status', (event) => {
     if (token !== streamGeneration || paused) return;
@@ -245,7 +387,8 @@ function openStream(token) {
       store.set({ errors: { ...store.get().errors, vehicles: 'The server returned invalid tracking status.' } });
       return;
     }
-    handleTrackingStatusPayload(data);
+    const outcome = handleTrackingStatusPayload(data);
+    if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') recordStreamTime(data, outcome);
     // Status-only events are never delivery-watchdog evidence, even when
     // valid: no live picture means nothing actually arrived to prove the
     // stream is delivering fresh data.
@@ -296,6 +439,10 @@ export function pausePolling() {
   callsGeneration++;
   clearWatchdog();
   clearFallbackTimer();
+  clearTimeout(clockResyncTimer);
+  clockResyncTimer = null;
+  clockResyncPending = null;
+  lastStreamServerTime = null;
   closeStream();
   liveAbort?.abort();
   liveAbort = null;
@@ -315,8 +462,13 @@ export function resumePolling() {
   liveFailures = 0;
   clearWatchdog();
   clearFallbackTimer();
+  clearTimeout(clockResyncTimer);
+  clockResyncTimer = null;
+  clockResyncPending = null;
+  lastStreamServerTime = null;
   closeStream();
   liveAbort?.abort();
+  liveAbort = null;
   lifecycleAbort?.abort();
   clearTimeout(basicRecoveryTimer);
   catalogRefreshPromise = null;
@@ -332,24 +484,37 @@ export function resumePolling() {
     if (store.get().selectedStop) onStopSelected();
     return;
   }
+  const retryWait = httpRetryWait();
+  if (retryWait > 0) {
+    openStream(token);
+    deferHttpRead(token, onWatchdogFired, retryWait);
+    if (store.get().selectedStop) onStopSelected();
+    return;
+  }
   // Immediate cached HTTP read for fast first paint, independent of the SSE
   // connection opened alongside it.
   const controller = new AbortController();
   liveAbort = controller;
+  const requestSequence = clockDiscrepancySequence;
   const isCurrent = () => !controller.signal.aborted && !paused && token === streamGeneration;
   const startedAtDelivery = deliveries;
   void refreshLiveVehicles({ signal: controller.signal, isCurrent }).then(({ outcome, data }) => {
     if (!isCurrent()) return;
+    if (outcome !== 'stale' && outcome !== 'aborted') confirmClockDiscrepancy(data, clockResyncPending, requestSequence);
     if (data) afterSnapshot(data, outcome);
     if (outcome === 'newer' || outcome === 'new-epoch' || outcome === 'duplicate') armWatchdog(token);
   }).catch((error) => {
+    if (error?.name !== 'AbortError') respectHttpRetryAfter(error);
     if (isCurrent() && error.name !== 'AbortError' && deliveries === startedAtDelivery) {
       store.set({
         liveQuality: { ...(store.get().liveQuality ?? {}), state: 'unavailable' },
         errors: { ...store.get().errors, vehicles: error.message },
       });
     }
-  }).finally(() => { if (liveAbort === controller) liveAbort = null; });
+  }).finally(() => {
+    if (liveAbort === controller) liveAbort = null;
+    if (isCurrent()) startClockResync(token);
+  });
   openStream(token);
   if (store.get().selectedStop) onStopSelected();
 }

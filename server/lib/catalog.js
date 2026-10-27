@@ -47,7 +47,11 @@ export async function captureCatalog({
   if (signal) setMaxListeners(32, signal); // Eight workers each have bounded queue/wait cancellation listeners.
   const options = { signal, priority: 'background', fresh };
   const [config, rawLines] = await withSignal(Promise.all([api.getConfig(options), api.getLines(options)]), signal);
-  const lines = validate('lines', rawLines, { upstream: true }).map(lineDto);
+  const currentLines = validate('lines', rawLines, { upstream: true }).map(lineDto);
+  // GetLines is day-dependent. Recheck previously validated lines' stops,
+  // rather than interpreting their absence today as a catalog deletion.
+  const lines = acceptRemovals ? currentLines : [...currentLines,
+    ...(previous?.lines ?? []).filter((line) => !currentLines.some((item) => item.id === line.id))];
   const areas = await runPooled(lines, 8, (line) => api.getStopAreas(line.id, options), { signal });
   const failedArea = areas.find((result) => result.status === 'rejected');
   if (failedArea) throw failedArea.reason;
@@ -60,8 +64,7 @@ export async function captureCatalog({
   if (failed) throw failed.reason;
   const stops = located.map((result) => result.value);
   if (previous && !acceptRemovals) {
-    if (previous.lines.some((line) => !lines.some((next) => next.id === line.id))
-      || previous.stops.some((stop) => !byId.has(stop.id))) {
+    if (previous.stops.some((stop) => !byId.has(stop.id))) {
       throw new Error('Catalog coverage decreased; review removals before using --accept-removals');
     }
   }

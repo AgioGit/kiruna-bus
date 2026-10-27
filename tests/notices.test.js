@@ -75,8 +75,12 @@ test('routine GPS expiry stays quiet without suppressing refresh failures', () =
   const messages = () => [...children].filter((child) => !child.hidden).map((child) => child.textContent);
   const quality = { state: 'stale', reasons: ['GPS_OLD'], positions: { expired: 1 }, scan: { failed: 0 } };
   try {
-    store.set({ catalogInfo: null, liveQuality: quality });
+    store.set({ catalogInfo: null, liveQuality: quality, serviceView: { active: new Set(), complete: false } });
     initUi();
+    assert.deepEqual(messages(), ['Route service is unknown; unverified routes are shown faded.']);
+    assert.equal(banner.hidden, false);
+
+    store.set({ serviceView: { active: new Set(), complete: true } });
     assert.deepEqual(messages(), []);
     assert.equal(banner.hidden, true);
 

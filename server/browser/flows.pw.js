@@ -90,6 +90,158 @@ test('live recovery, departures, filters, selection and selected-position expiry
   expect(await page.evaluate(async () => (await import('/js/appState.js')).store.get().liveVehicles.length)).toBe(0);
 });
 
+test('selected stop retains one unconfirmed previous time across boundaries and forecast corrections', async ({ page }) => {
+  const start = Date.now();
+  const iso = (offset) => new Date(start + offset).toISOString();
+  await page.clock.install({ time: new Date(start) });
+  const lineId = catalog.lines[0].id;
+  const makeCall = (id, offset, forecast = offset) => ({
+    id, lineId, line: 'Red', journeyId: 1, sequenceNumber: 1, destination: id,
+    departure: { plannedTime: iso(offset), forecastTime: iso(forecast), quality: 'realtime' },
+  });
+  let response = { calls: [makeCall('Later', 120000)],
+    messages: [], isStopCancelled: false, updatedAt: iso(0), state: 'fresh',
+    previousDeparture: { call: makeCall('Yesterday', -86400000), observedAt: iso(0),
+      messages: [{ text: 'Cancelled service', affectedCalls: ['Yesterday'], isDisturbance: true }], isStopCancelled: true },
+    pendingDepartures: [{ call: makeCall('First', 10000), observedAt: iso(0), messages: [], isStopCancelled: false }] };
+  await page.route('**/api/v1/stops/*/departures', (route) => route.fulfill({ json: response }));
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto('/');
+  await expect(page.locator('#line-filters input')).toHaveCount(catalog.lines.length);
+  await page.evaluate(async (stop) => {
+    (await import('/js/poller.js')).pausePolling();
+    (await import('/js/stops.js')).selectStopArea(stop);
+    await (await import('/js/calls.js')).fetchCallsForSelectedStop();
+  }, catalog.stops[0]);
+  const history = page.locator('.departure-card--previous');
+  await expect(history).toContainText('Yesterday');
+  await expect(history).toContainText('Cancelled service');
+  await expect(history).toContainText('Stop departures were marked cancelled');
+  await expect(history).toContainText(new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(start - 86400000)));
+  await expect(page.locator('#arrivals-content')).not.toContainText('First');
+  await page.clock.runFor(10050);
+  await expect(history).toHaveCount(1);
+  await expect(history).toContainText('First');
+  await expect(history).toContainText('Time passed · departure unconfirmed');
+  await expect(history).not.toContainText('Live estimate');
+  await expect(page.locator('.departure-card:not(.departure-card--previous)')).toHaveCount(1);
+  await page.evaluate(async () => {
+    const { store } = await import('/js/appState.js');
+    store.set({ activeLineIds: new Set() });
+  });
+  await expect(history).toHaveCount(0);
+  await page.evaluate(async (id) => {
+    const { store } = await import('/js/appState.js');
+    store.set({ activeLineIds: new Set([id]) });
+  }, lineId);
+  response = { ...response, previousDeparture: null, pendingDepartures: [], isStopCancelled: true,
+    updatedAt: iso(11000), calls: [makeCall('First', 10000, 60000), makeCall('Later', 120000)] };
+  await page.evaluate(async () => (await import('/js/calls.js')).fetchCallsForSelectedStop());
+  await expect(history).toHaveCount(0);
+  await expect(page.locator('.departure-card:not(.departure-card--previous)')).toHaveCount(2);
+  await page.clock.runFor(50000);
+  await expect(history).toContainText('First');
+  await page.clock.runFor(131001);
+  await expect(history).toContainText('Later');
+  await expect(page.locator('#arrivals-content')).toContainText('Departures could not be refreshed');
+  await expect(page.locator('.banner-cancelled')).toHaveCount(0);
+  await expect(history).toContainText('Stop departures were marked cancelled');
+  await expect(page.locator('.departure-card:not(.departure-card--previous)')).toHaveCount(0);
+  await page.evaluate(async () => (await import('/js/stops.js')).clearSelectedStop());
+  await expect(page.locator('#arrivals')).toBeHidden();
+  await page.evaluate(async (stop) => (await import('/js/stops.js')).selectStopArea(stop), catalog.stops[1]);
+  await expect(history).toHaveCount(0);
+});
+
+test('history-only lines are selectable without creating route service or vehicles', async ({ page }) => {
+  const time = Date.now(), iso = (offset) => new Date(time + offset).toISOString();
+  const minimal = structuredClone(catalog);
+  const routeId = catalog.lineRoutes[catalog.lines[0].id][0];
+  minimal.version = 'history-only-line';
+  minimal.lines = [{ id: 1, text: 'Line 1' }];
+  minimal.lineRoutes = { 1: [routeId] };
+  await page.route('**/api/v1/bootstrap', (route) => route.fulfill({ json: { catalog: minimal, source: 'bundled', serverTime: iso(0) } }));
+  const previous = {
+    call: { id: 'past', lineId: 99, line: 'Line 99', routeId: 99999, journeyId: 1, sequenceNumber: 1, destination: 'Town',
+      departure: { plannedTime: iso(-1000), forecastTime: iso(-1000) } },
+    observedAt: iso(0), isStopCancelled: false, messages: [
+      { text: 'General warning', affectedCalls: [] },
+      { text: 'Different call only', affectedCalls: ['other'] },
+    ],
+  };
+  await page.route('**/api/v1/stops/*/departures', (route) => route.fulfill({ json: {
+    calls: [], messages: [], isStopCancelled: false, updatedAt: iso(0), state: 'fresh', previousDeparture: previous,
+  } }));
+  await page.goto('/');
+  await expect(page.locator('#line-filters input')).toHaveCount(1);
+  await page.evaluate(async (stop) => {
+    (await import('/js/poller.js')).pausePolling();
+    (await import('/js/stops.js')).selectStopArea(stop);
+    await (await import('/js/calls.js')).fetchCallsForSelectedStop();
+  }, minimal.stops[0]);
+  const history = page.locator('.departure-card--previous');
+  const line99 = page.locator('#line-filters input[data-line-id="99"]');
+  await expect(line99).toBeChecked();
+  await expect(line99.locator('..')).toContainText('Line 99');
+  await expect(history).toHaveCount(1);
+  await expect(history).toContainText('Time passed · departure unconfirmed');
+  await expect(history).toContainText('General notice at the time: General warning');
+  await expect(history).not.toContainText('Different call only');
+  await page.locator('#map-lines-toggle').click();
+  await line99.uncheck();
+  await expect(history).toHaveCount(0);
+  await page.evaluate(async () => (await import('/js/calls.js')).fetchCallsForSelectedStop());
+  await expect(line99).not.toBeChecked();
+  await expect(history).toHaveCount(0);
+  await page.evaluate(async (value) => {
+    value.version = 'history-only-line-refresh';
+    value.capturedAt = new Date(Date.parse(value.capturedAt) + 1000).toISOString();
+    (await import('/js/config.js')).applyCatalog(value, 'upstream');
+  }, minimal);
+  await expect(line99).not.toBeChecked();
+  expect(await page.evaluate(async () => {
+    const state = (await import('/js/appState.js')).store.get();
+    return { hasRoutes: state.lineRoutes.has(99), hasGeometry: state.routeGeometry.has(99999),
+      hasService: [...state.serviceView.active].some((key) => key.startsWith('99:')), vehicles: state.liveVehicles.length };
+  })).toEqual({ hasRoutes: false, hasGeometry: false, hasService: false, vehicles: 0 });
+  await line99.check();
+  await expect(history).toHaveCount(1);
+});
+
+test('a pruned call retains general and call-specific notices without leaking other notices', async ({ page }) => {
+  const time = Date.now(), iso = (offset) => new Date(time + offset).toISOString();
+  await page.clock.install({ time: new Date(time) });
+  const call = { id: 'notice-call', lineId: catalog.lines[0].id, line: 'Red', journeyId: 1,
+    sequenceNumber: 1, destination: 'Town', departure: { plannedTime: iso(1000), forecastTime: iso(1000) } };
+  let response = { calls: [call], messages: [
+    { text: 'Service cancelled', isDisturbance: true, affectedCalls: [] },
+    { text: 'This line notice', affectedCalls: [], lines: [{ lineId: call.lineId, lineName: 'Red' }] },
+    { text: 'Other line notice', affectedCalls: [], lines: [{ lineId: call.lineId + 1, lineName: 'Blue' }] },
+    { text: 'This call notice', affectedCalls: [call.id] },
+    { text: 'Other call notice', affectedCalls: ['other'] },
+  ], isStopCancelled: false, updatedAt: iso(0), state: 'fresh' };
+  await page.route('**/api/v1/stops/*/departures', (route) => route.fulfill({ json: response }));
+  await page.goto('/');
+  await expect(page.locator('#line-filters input')).toHaveCount(catalog.lines.length);
+  await page.evaluate(async (stop) => {
+    (await import('/js/poller.js')).pausePolling();
+    (await import('/js/stops.js')).selectStopArea(stop);
+    await (await import('/js/calls.js')).fetchCallsForSelectedStop();
+  }, catalog.stops[0]);
+  response = { ...response, calls: [], messages: [], updatedAt: iso(500) };
+  await page.evaluate(async () => (await import('/js/calls.js')).fetchCallsForSelectedStop());
+  await page.clock.runFor(1000);
+  const history = page.locator('.departure-card--previous');
+  await expect(history).toHaveCount(1);
+  await expect(history).toContainText('General notice at the time: Service cancelled');
+  await expect(history).toContainText('Notice for this line at the time: This line notice');
+  await expect(history).toContainText('Notice for this call: This call notice');
+  await expect(history).not.toContainText('Other line notice');
+  await expect(history).not.toContainText('Other call notice');
+  await expect(history).not.toContainText('Stop departures were marked cancelled');
+  await expect(history).toContainText('Time passed · departure unconfirmed');
+});
+
 test('hidden tabs stop polling and resume immediately without stale writes', async ({ page }) => {
   let requests = 0;
   page.on('request', (request) => { if (request.url().endsWith('/api/v1/buses')) requests++; });
@@ -217,6 +369,10 @@ for (const width of [1280, 375, 320]) {
     await page.getByRole('button', { name: 'About this page', exact: true }).click();
     await page.evaluate(async () => {
       (await import('/js/poller.js')).pausePolling();
+      const { now } = await import('/js/clock.js');
+      (await import('/js/service.js')).applyService({
+        completeUntil: new Date(now() + 3600000).toISOString(), windows: [],
+      });
       const { store } = await import('/js/appState.js');
       store.set({
         catalogInfo: null,
@@ -552,10 +708,12 @@ async function catalogVersion(page) {
 async function schedule(page) {
   return page.evaluate(async () => (await import('/js/poller.js')).getLiveVehiclesSchedule());
 }
-function busesDto(version, { epoch = 'epoch-a', revision = 1, vehicles = [], quality = { state: 'fresh', reasons: [] }, error = null } = {}) {
+function busesDto(version, { epoch = 'epoch-a', revision = 1, vehicles = [], quality = { state: 'fresh', reasons: [] },
+  error = null, serverTime = new Date().toISOString(), service } = {}) {
   return {
-    generatedAt: new Date().toISOString(), serverTime: new Date().toISOString(),
+    generatedAt: serverTime, serverTime,
     epoch, revision, catalogVersion: version, vehicles, lineRoutes: {}, quality, error,
+    ...(service === undefined ? {} : { service }),
   };
 }
 
@@ -563,20 +721,25 @@ test('healthy SSE delivers snapshots and never falls back to HTTP polling', asyn
   await installFakeEventSource(page);
   await page.clock.install();
   const version = await fetchCatalogVersion(request);
+  const firstTime = await page.evaluate(() => new Date().toISOString());
+  const healthyDto = (revision, serverTime) => busesDto(version, {
+    revision, serverTime, service: { completeUntil: new Date(Date.parse(serverTime) + 360000).toISOString(), windows: [] },
+  });
   let busesRequests = 0;
   await page.route('**/api/v1/buses', (route) => {
     busesRequests++;
-    route.fulfill({ json: busesDto(version, { revision: 1 }) });
+    route.fulfill({ json: healthyDto(1, firstTime), headers: { 'x-server-time': firstTime } });
   });
   await page.goto('/'); // initPoller() auto-opens the stream + fires the one immediate HTTP read
   await expect.poll(() => sseCount(page)).toBe(1);
   await expect.poll(() => busesRequests).toBe(1);
   await sseOpen(page, 0);
   await expect.poll(() => schedule(page).then((s) => s.connected)).toBe(true);
-  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 }));
+  await sseEmit(page, 0, 'buses', healthyDto(2, await page.evaluate(() => new Date().toISOString())));
   await page.clock.runFor(59000);
-  await sseEmit(page, 0, 'buses', busesDto(version, { revision: 3 }));
+  await sseEmit(page, 0, 'buses', healthyDto(3, await page.evaluate(() => new Date().toISOString())));
   await page.clock.runFor(59000);
+  expect(await page.evaluate(async () => (await import('/js/appState.js')).store.get().serviceView.complete)).toBe(true);
   expect(await sseCount(page)).toBe(1); // never reconnected: each delivery re-armed the watchdog in time
   expect(busesRequests).toBe(1); // still just the one initial HTTP read, no fallback ever triggered
 });

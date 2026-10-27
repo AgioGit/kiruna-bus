@@ -24,6 +24,7 @@
   --color-selected-hover: #f4f8ff;
   --color-card-hover-border: #7295c4;
   --color-disabled: #9db6d8;
+  --color-history-badge: #d7dce1;
   --color-info-bg: #e8f0fb;
   --color-danger-bg: #fbeaea;
   --color-danger-soft: #fff2f2;
@@ -57,6 +58,7 @@
   --color-selected-hover: #20365a;
   --color-card-hover-border: #4a78b5;
   --color-disabled: #3b5273;
+  --color-history-badge: #46505a;
   --color-info-bg: #162a47;
   --color-danger-bg: #3a1c1f;
   --color-danger-soft: #3a1c1f;
@@ -757,6 +759,25 @@ button.vehicle-card {
 
 .departure-card:last-child {
   border-bottom: 0;
+}
+
+.departure-card--previous {
+  margin-top: 0.5rem;
+  padding: 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-muted);
+  background: var(--color-surface);
+}
+
+.departure-card--previous .line-badge {
+  background: var(--color-history-badge);
+  color: var(--color-ink);
+}
+
+.departure-card--previous .departure-destination {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .departure-time {

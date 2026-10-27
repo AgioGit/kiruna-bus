@@ -135,3 +135,17 @@ test('a newly discovered line can resolve routes from new stops without rescanni
     assert.deepEqual(catalog.get().lineRoutes[line.id], [999]);
   } finally { catalog.close(); }
 });
+
+test('day-dependent line subset retains validated line and stop coverage, but incomplete stop data is rejected', async () => {
+  const api = fakeApi();
+  const absent = snapshot.lines.at(-1);
+  api.getLines = async () => snapshot.lines.filter((line) => line.id !== absent.id);
+  const requested = [];
+  api.getStopAreas = async (id) => { requested.push(id); return snapshot.stops; };
+  const retained = await captureCatalog({ api, previous: snapshot, lineRoutes: snapshot.lineRoutes });
+  assert.ok(retained.lines.some((line) => line.id === absent.id));
+  assert.ok(requested.includes(absent.id));
+  assert.deepEqual(retained.lineRoutes[absent.id], snapshot.lineRoutes[absent.id]);
+  api.getStopAreas = async () => snapshot.stops.slice(1);
+  await assert.rejects(captureCatalog({ api, previous: snapshot, lineRoutes: snapshot.lineRoutes }), /coverage decreased/);
+});

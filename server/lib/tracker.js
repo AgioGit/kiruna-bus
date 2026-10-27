@@ -2,6 +2,7 @@ import { runPooled, withSignal } from './pool.js';
 import { AppError, unavailable as liveUnavailable } from './errors.js';
 import { randomUUID } from 'node:crypto';
 import { setMaxListeners } from 'node:events';
+import { advanceDepartureHistory, observeCalls } from '../../src/js/departure-history.js';
 
 export const UPCOMING_STOP_COUNT = 2;
 
@@ -15,6 +16,100 @@ export const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 // on one stop during a cycle). Fixed independently of the collector's dynamic
 // cycle cadence so a faster collector cadence can't shrink this window.
 export const CALL_RETENTION_MS = 6 * 60 * 1000;
+export const SERVICE_LEAD_MS = 30 * 60 * 1000;
+
+function callServiceTimes(call) {
+  return [call.arrival, call.departure].map((value) => Date.parse(value?.forecastTime ?? value?.plannedTime ?? ''))
+    .filter(Number.isFinite);
+}
+
+// For each observation age, only calls at least that fresh can support the
+// corresponding journey span. Older calls may support a wider span, but must
+// not shorten the lifetime of a newer call's own evidence.
+export function buildServiceWindows(entries, clockOffsetMs = 0) {
+  const groups = new Map();
+  for (const entry of entries) {
+    for (const call of entry.calls) {
+      if (!call.routeId || call.journeyId == null) continue;
+      const times = callServiceTimes(call);
+      if (!times.length) continue;
+      const key = `${call.lineId}:${call.routeId}:${call.journeyId}`;
+      const group = groups.get(key) ?? { lineId: call.lineId, routeId: call.routeId, calls: [] };
+      const departure = Date.parse(call.departure?.forecastTime ?? call.departure?.plannedTime ?? '');
+      group.calls.push({
+        start: Number.isFinite(departure) ? departure : Math.min(...times),
+        end: Math.max(...times), expires: entry.at + clockOffsetMs + CALL_RETENTION_MS,
+      });
+      groups.set(key, group);
+    }
+  }
+  const windows = [];
+  for (const { lineId, routeId, calls } of groups.values()) {
+    calls.sort((a, b) => b.expires - a.expires);
+    let start = Infinity, end = -Infinity;
+    for (let i = 0; i < calls.length; i++) {
+      const call = calls[i];
+      start = Math.min(start, call.start);
+      end = Math.max(end, call.end);
+      if (calls[i + 1]?.expires === call.expires) continue;
+      windows.push({ lineId, routeId, from: new Date(start - SERVICE_LEAD_MS).toISOString(),
+        until: new Date(end).toISOString(), expiresAt: new Date(call.expires).toISOString() });
+    }
+  }
+  return windows;
+}
+
+// Sweep each route's interval endpoints and retain the greatest supporting
+// expiry at every instant. Overlapping segments at endpoints preserve the
+// inclusive "until" boundary, including single-instant windows.
+export function coalesceServiceWindows(windows) {
+  const groups = new Map();
+  for (const window of windows) {
+    const key = `${window.lineId}:${window.routeId}`;
+    const group = groups.get(key) ?? { lineId: window.lineId, routeId: window.routeId, events: new Map(), expiries: new Set() };
+    const expires = Date.parse(window.expiresAt);
+    for (const [at, kind] of [[Date.parse(window.from), 'starts'], [Date.parse(window.until), 'ends']]) {
+      const event = group.events.get(at) ?? { starts: [], ends: [] };
+      event[kind].push(expires);
+      group.events.set(at, event);
+    }
+    group.expiries.add(expires);
+    groups.set(key, group);
+  }
+  const result = [];
+  for (const { lineId, routeId, events, expiries } of groups.values()) {
+    const active = new Map();
+    const descending = [...expiries].sort((a, b) => b - a);
+    const maximum = () => descending.find((expiry) => active.get(expiry) > 0) ?? null;
+    const segments = new Map();
+    const add = (from, until, expires) => {
+      const list = segments.get(expires) ?? [];
+      const last = list[list.length - 1];
+      if (last && last.until >= from) last.until = Math.max(last.until, until);
+      else list.push({ from, until });
+      segments.set(expires, list);
+    };
+    let previous = null;
+    for (const [at, event] of [...events].sort((a, b) => a[0] - b[0])) {
+      const before = maximum();
+      if (previous !== null && before !== null) add(previous, at, before);
+      for (const expiry of event.starts) active.set(expiry, (active.get(expiry) ?? 0) + 1);
+      const point = maximum();
+      for (const expiry of event.ends) active.set(expiry, active.get(expiry) - 1);
+      const after = maximum();
+      if (point !== null && (before === null || point > before) && (after === null || point > after)) {
+        add(at, at, point);
+      }
+      previous = at;
+    }
+    for (const [expires, list] of segments) {
+      for (const { from, until } of list) result.push({ lineId, routeId,
+        from: new Date(from).toISOString(), until: new Date(until).toISOString(),
+        expiresAt: new Date(expires).toISOString() });
+    }
+  }
+  return result;
+}
 
 const DEFAULT_OPTIONS = {
   stopsTtlMs: 6 * 60 * 60 * 1000,
@@ -285,6 +380,11 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
   let lastSuccessfulPositions = null;
   let revision = 0;
   let callsByStop = new Map(); // stopAreaId -> { calls, messages, isStopCancelled, at, text } (raw, shared with departures)
+  let departureHistoryByStop = new Map();
+  let serviceWindows = [];
+  let serviceLineNames = new Map();
+  let completeServiceUntil = null;
+  let completeStopIds = new Set();
   const shutdown = new AbortController();
   let operationSignal;
   const apiOptions = (extra = {}) => ({ signal: operationSignal, priority: 'interactive', ...extra });
@@ -421,6 +521,22 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     if (cacheBytes > opt.callCacheMaxBytes) {
       throw new AppError('LIVE_CACHE_LIMIT', 'Retained stop data exceeds the live cache limit.', { status: 503 });
     }
+    const stagedHistory = new Map();
+    let historyBytes = 0;
+    for (let i = 0; i < stopList.length; i++) {
+      const id = stopList[i].id;
+      const result = callResults[i];
+      const entry = result.status === 'fulfilled' ? result.value : null;
+      const observations = entry
+        ? observeCalls(entry.calls, entry.messages, entry.isStopCancelled, new Date(entry.at).toISOString()) : [];
+      const history = advanceDepartureHistory(departureHistoryByStop.get(id), observations, serverNow());
+      if (!history.previous && !history.pending.length) continue;
+      const size = Buffer.byteLength(JSON.stringify(history));
+      // Live cache has priority if the shared memory budget is exhausted.
+      if (cacheBytes + historyBytes + size > opt.callCacheMaxBytes) continue;
+      historyBytes += size;
+      stagedHistory.set(id, history);
+    }
 
     const callsWithStop = [];
     for (const [, entry] of stagedCallsByStop) {
@@ -434,6 +550,27 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       stagedLineRoutes.set(call.lineId, set);
     }
     const stagedJourneys = buildJourneys(callsWithStop);
+    const observedWindows = buildServiceWindows([...stagedCallsByStop.values()], clockOffsetMs);
+    const callsClassifiable = callsWithStop.every(({ call }) =>
+      call.routeId && call.journeyId != null && callServiceTimes(call).length);
+    const complete = stopList.length > 0 && !newCoverage.failed && callsClassifiable;
+    const sameCoverage = stopList.length === completeStopIds.size && stopList.every((stop) => completeStopIds.has(stop.id));
+    const newCompleteServiceUntil = complete
+      ? new Date(Math.min(...callResults.map((res) => res.value.at)) + clockOffsetMs + CALL_RETENTION_MS).toISOString()
+      : sameCoverage ? completeServiceUntil : null;
+    const candidates = complete ? observedWindows : [
+      ...serviceWindows.filter((window) => Date.parse(window.expiresAt) > serverNow()),
+      ...observedWindows,
+    ];
+    const newServiceWindows = coalesceServiceWindows(candidates);
+    const newServiceLineNames = new Map(serviceLineNames);
+    for (const { call } of callsWithStop) {
+      if (call.lineId && call.line) newServiceLineNames.set(call.lineId, call.line);
+    }
+    const serviceLineIds = new Set(newServiceWindows.map((window) => window.lineId));
+    for (const lineId of newServiceLineNames.keys()) {
+      if (!serviceLineIds.has(lineId)) newServiceLineNames.delete(lineId);
+    }
     const newScanError = !scanOk ? 'Unable to refresh live bus data.'
       : newCoverage.failed ? 'Some stops could not be refreshed.' : null;
     const newLastSuccessfulScan = !newCoverage.failed && scanOk
@@ -484,6 +621,11 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
 
     // --- Commit: one synchronous block, nothing awaited in between. ---
     callsByStop = stagedCallsByStop;
+    departureHistoryByStop = stagedHistory;
+    serviceWindows = newServiceWindows;
+    serviceLineNames = newServiceLineNames;
+    completeServiceUntil = newCompleteServiceUntil;
+    if (complete) completeStopIds = new Set(stopList.map((stop) => stop.id));
     journeys = stagedJourneys;
     lineRoutes = stagedLineRoutes;
     positions = stagedPositions;
@@ -515,6 +657,9 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       refreshing = collectOnce({ fresh }).catch((error) => {
         scanError = 'Unable to refresh live bus data.';
         const attempted = stops?.length ?? 0;
+        if (attempted !== completeStopIds.size || stops?.some((stop) => !completeStopIds.has(stop.id))) {
+          completeServiceUntil = null;
+        }
         coverage = { attempted, succeeded: 0, failed: attempted };
         completed = true;
         revision += 1;
@@ -535,7 +680,8 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     getSnapshot({ legacy = false } = {}) {
       if (!completed) throw liveUnavailable(scanError ? 'LIVE_UNAVAILABLE' : 'WARMING_UP');
       const error = scanError ?? positionsError;
-      const nowMs = serverNow();
+      const readAt = now();
+      const nowMs = readAt + clockOffsetMs;
       const displayJourneys = new Map(journeys);
       const displayPositions = new Map(positions);
       const unavailable = new Set(unavailableCallIds);
@@ -565,16 +711,56 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       const vehicles = buildVehicles({
         journeys: displayJourneys, positions: displayPositions, nowMs, unavailableCallIds: unavailable,
       });
-      if (!legacy && !vehicles.length && error) throw liveUnavailable('LIVE_UNAVAILABLE');
-      if (!displayJourneys.size && error) throw liveUnavailable('LIVE_UNAVAILABLE');
+      if (error && (legacy ? !displayJourneys.size : !Number.isFinite(lastScanAt))) {
+        throw liveUnavailable('LIVE_UNAVAILABLE');
+      }
+
+      const currentCalls = [...callsByStop.values()]
+        .filter((entry) => readAt - entry.at < CALL_RETENTION_MS)
+        .flatMap((entry) => entry.calls);
+      const observedLines = new Map(currentCalls
+        .filter((call) => call.lineId && call.line)
+        .map((call) => [call.lineId, { id: call.lineId, text: call.line }]));
+      const snapshotRoutes = new Map();
+      for (const call of currentCalls) {
+        if (!call.lineId || !call.routeId) continue;
+        const routes = snapshotRoutes.get(call.lineId) ?? new Set();
+        routes.add(call.routeId);
+        snapshotRoutes.set(call.lineId, routes);
+      }
+      const currentServiceWindows = serviceWindows.filter((window) => Date.parse(window.expiresAt) > nowMs);
+      for (const window of currentServiceWindows) {
+        const name = serviceLineNames.get(window.lineId);
+        if (name && !observedLines.has(window.lineId)) {
+          observedLines.set(window.lineId, { id: window.lineId, text: name });
+        }
+        const routes = snapshotRoutes.get(window.lineId) ?? new Set();
+        routes.add(window.routeId);
+        snapshotRoutes.set(window.lineId, routes);
+      }
+      for (const vehicle of vehicles) {
+        if (vehicle.lineId && vehicle.line && !observedLines.has(vehicle.lineId)) {
+          observedLines.set(vehicle.lineId, { id: vehicle.lineId, text: vehicle.line });
+        }
+        if (vehicle.lineId && vehicle.routeId) {
+          const routes = snapshotRoutes.get(vehicle.lineId) ?? new Set();
+          routes.add(vehicle.routeId);
+          snapshotRoutes.set(vehicle.lineId, routes);
+        }
+      }
 
       return {
-        generatedAt: new Date(now()).toISOString(),
+        generatedAt: new Date(readAt).toISOString(),
         serverTime: new Date(nowMs).toISOString(),
         error,
         quality: this.quality(),
         vehicles,
-        lineRoutes: Object.fromEntries([...lineRoutes].map(([lineId, routeIds]) => [lineId, [...routeIds]])),
+        service: {
+          completeUntil: completeServiceUntil,
+          windows: currentServiceWindows,
+        },
+        observedLines: [...observedLines.values()],
+        lineRoutes: Object.fromEntries([...snapshotRoutes].map(([lineId, routeIds]) => [lineId, [...routeIds]])),
       };
     },
 
@@ -596,6 +782,15 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       return { calls: entry.calls, messages: entry.messages, isStopCancelled: entry.isStopCancelled,
         at: entry.at, text: entry.text, failed: entry.failed };
     },
+
+    getDepartureHistory(stopId) {
+      const history = departureHistoryByStop.get(stopId);
+      if (!history) return { previous: null, pending: [] };
+      const advanced = advanceDepartureHistory(history, [], serverNow());
+      departureHistoryByStop.set(stopId, advanced);
+      return advanced;
+    },
+    getPreviousDeparture(stopId) { return this.getDepartureHistory(stopId).previous; },
 
     getRevision: () => revision,
 

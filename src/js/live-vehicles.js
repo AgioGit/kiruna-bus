@@ -1,8 +1,9 @@
 import { api, ApiError } from './api.js';
 import { store } from './appState.js';
 import { mergeLineRoutes } from './routes.js';
-import { synchronizeClock } from './clock.js';
+import { CLOCK_SAMPLE_MAX_AGE, synchronizeClock, subscribeClock, now } from './clock.js';
 import { acceptRevision, classifyRevision, getTrackingState, isValidBusesSnapshot } from './tracking.js';
+import { applyService } from './service.js';
 
 // Buses whose next stop is further away than this are left out: they are
 // parked or between trips and not worth showing yet.
@@ -16,15 +17,15 @@ export function isPositionFresh(bus, nowMs) {
   return Number.isFinite(timestamp) && nowMs - timestamp <= MAX_POSITION_AGE_MS;
 }
 
-function expirePositions(vehicles, serverNowMs, receivedAt) {
+function expirePositions(vehicles) {
   if (expiryTimer != null) clearTimeout(expiryTimer);
   expiryTimer = null;
-  const nowMs = serverNowMs + performance.now() - receivedAt;
+  const nowMs = now();
   const fresh = vehicles.filter((bus) => isPositionFresh(bus, nowMs));
   store.set({ liveVehicles: fresh, journeyStops: buildJourneyStops(fresh) });
   if (!fresh.length) return;
   const nextExpiry = Math.min(...fresh.map((bus) => Date.parse(bus.position.timestamp) + MAX_POSITION_AGE_MS));
-  expiryTimer = setTimeout(() => expirePositions(fresh, serverNowMs, receivedAt), nextExpiry - nowMs + 1);
+  expiryTimer = setTimeout(() => expirePositions(fresh), nextExpiry - nowMs + 1);
   expiryTimer?.unref?.();
 }
 
@@ -44,7 +45,7 @@ export function buildJourneyStops(vehicles) {
 }
 
 function applySnapshotMetadata(data) {
-  synchronizeClock(data.serverTime);
+  synchronizeClock(data.serverTime, { maxAgeMs: data[CLOCK_SAMPLE_MAX_AGE] });
   store.set({
     liveQuality: data.quality,
     errors: { ...store.get().errors, vehicles: data.error ?? null },
@@ -58,14 +59,27 @@ function applySnapshotMetadata(data) {
 // payload is new enough to reach this function at all. Returns the filtered
 // vehicle list actually stored.
 export function applySnapshot(data) {
-  const serverNowMs = Date.parse(data.serverTime ?? '');
-  const nowMs = Number.isNaN(serverNowMs) ? Date.now() : serverNowMs;
-  const vehicles = (data.vehicles ?? []).filter((bus) => isNextStopSoon(bus, nowMs) && isPositionFresh(bus, nowMs));
   applySnapshotMetadata(data);
-  expirePositions(vehicles, nowMs, performance.now());
+  const nowMs = now();
+  const vehicles = (data.vehicles ?? []).filter((bus) => isPositionFresh(bus, nowMs) && isNextStopSoon(bus, nowMs));
+  const state = store.get();
+  const known = new Set(state.lines.map((line) => line.id));
+  const newLines = [...new Map((data.observedLines ?? []).filter((line) => !known.has(line.id))
+    .map((line) => [line.id, line])).values()];
+  if (newLines.length) store.set({
+    lines: [...state.lines, ...newLines],
+    activeLineIds: new Set([...state.activeLineIds, ...newLines.map((line) => line.id)]),
+  });
+  applyService(data.service);
+  expirePositions(vehicles);
   mergeLineRoutes(data.lineRoutes);
   return vehicles;
 }
+
+subscribeClock(() => {
+  const vehicles = store.get().liveVehicles;
+  if (expiryTimer != null || vehicles.length) expirePositions(vehicles);
+});
 
 // Validates and orders-checks a buses DTO before applying it. Shared by the
 // HTTP poll path and the SSE stream so both honor the same epoch/revision

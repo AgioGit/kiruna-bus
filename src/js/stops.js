@@ -1,6 +1,7 @@
 import { api } from './api.js';
 import { store } from './appState.js';
 import { onStopSelected, onStopDeselected } from './poller.js';
+import { resetSelectedStopCalls } from './calls.js';
 
 const MIN_QUERY_LENGTH = 2;
 const DEBOUNCE_MS = 300;
@@ -76,10 +77,12 @@ export async function selectStopsNearLocation(coordinate) {
 
 export function selectStopArea(stop) {
   selectionRequest++;
+  resetSelectedStopCalls();
   store.set((state) => ({
     selectedStop: stop,
     stopSelectionSeq: state.stopSelectionSeq + 1,
     calls: [],
+    previousDeparture: null,
     messages: [],
     isStopCancelled: false,
     isCallsLoading: true,
@@ -90,8 +93,10 @@ export function selectStopArea(stop) {
 
 export function clearSelectedStop() {
   selectionRequest++;
+  resetSelectedStopCalls();
   store.set((state) => ({
     selectedStop: null, stopSelectionSeq: state.stopSelectionSeq + 1,
+    previousDeparture: null,
     errors: { ...state.errors, calls: null, stopNotFound: null },
   }));
   onStopDeselected();

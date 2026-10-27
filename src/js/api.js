@@ -1,3 +1,5 @@
+import { CLOCK_SAMPLE_MAX_AGE } from './clock.js';
+
 const BASE_URL = (globalThis.BOREAL_CONFIG?.apiBase || '/api').replace(/\/+$/, '') + '/v1';
 
 // Exposed so the SSE stream (opened directly via native EventSource, not the
@@ -20,6 +22,7 @@ function retryAfter(value) {
 }
 
 export async function request(path, { method = 'GET', query, body, signal, timeoutMs = 10000 } = {}) {
+  const startedAt = performance.now();
   const url = new URL(BASE_URL + path, globalThis.location?.href ?? 'http://localhost/');
   for (const [key, value] of Object.entries(query ?? {})) if (value != null) url.searchParams.set(key, value);
   const controller = new AbortController();
@@ -43,7 +46,10 @@ export async function request(path, { method = 'GET', query, body, signal, timeo
         retryAfter: retryAfter(response.headers.get('retry-after')),
       });
     }
-    if (data && !Array.isArray(data) && response.headers.get('x-server-time')) data.serverTime = response.headers.get('x-server-time');
+    if (data && !Array.isArray(data) && response.headers.get('x-server-time')) {
+      data.serverTime = response.headers.get('x-server-time');
+      Object.defineProperty(data, CLOCK_SAMPLE_MAX_AGE, { value: Math.max(0, performance.now() - startedAt) });
+    }
     return data;
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? new DOMException('Cancelled', 'AbortError');

@@ -213,7 +213,7 @@ test('missing positions are retained only through the exact three-minute boundar
   assert.equal(boundary.vehicles.length, 1);
   assert.equal(boundary.vehicles[0].position.timestamp, timestamp);
   fake.state.now += 1;
-  assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+  assert.deepEqual(tracker.getSnapshot().vehicles, []);
   assert.deepEqual(tracker.getBuses().vehicles, []);
   assert.match(tracker.getBuses().error, /no bus positions/);
 });
@@ -545,7 +545,8 @@ test('total call failure cannot keep fetching positions for journeys beyond call
     await tracker.collect();
     assert.equal(tracker.getStopCalls(1), null);
     assert.equal(fake.counts.positions, positionRequests);
-    assert.throws(() => tracker.getSnapshot(), { code: 'LIVE_UNAVAILABLE' });
+    assert.deepEqual(tracker.getSnapshot().vehicles, []);
+    assert.ok(Date.parse(tracker.getSnapshot().service.completeUntil) < fake.state.now);
     assert.equal(tracker.status().quality.scan.succeeded, 0);
   } finally { tracker.close(); }
 });

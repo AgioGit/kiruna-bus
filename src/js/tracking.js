@@ -41,6 +41,14 @@ const stop = (value) => object(value) && (value.stopText === null || typeof valu
   && optionalTime(value.plannedTime) && optionalTime(value.forecastTime);
 const quality = (value) => object(value) && ['fresh', 'partial', 'stale', 'unavailable'].includes(value.state)
   && Array.isArray(value.reasons) && value.reasons.every((reason) => typeof reason === 'string');
+const positiveId = (id) => Number.isSafeInteger(id) && id > 0;
+const serviceTime = (value) => timestamp(value) && /T.*(?:Z|[+-]\d\d:\d\d)$/i.test(value);
+const service = (value) => object(value) && Object.hasOwn(value, 'completeUntil')
+  && (value.completeUntil === null || serviceTime(value.completeUntil))
+  && Array.isArray(value.windows) && value.windows.every((window) =>
+    object(window) && positiveId(window.lineId) && positiveId(window.routeId)
+    && serviceTime(window.from) && serviceTime(window.until) && serviceTime(window.expiresAt)
+    && Date.parse(window.from) <= Date.parse(window.until));
 function vehicle(value) {
   const location = value?.position?.location;
   return object(value) && Number.isSafeInteger(value.journeyId) && Number.isSafeInteger(value.lineId)
@@ -62,6 +70,9 @@ export function isValidBusesSnapshot(data) {
     && timestamp(data.generatedAt) && quality(data.quality)
     && (data.error == null || typeof data.error === 'string')
     && Array.isArray(data.vehicles) && data.vehicles.every(vehicle)
+    && (data.service === undefined || service(data.service))
+    && (data.observedLines === undefined || Array.isArray(data.observedLines) &&
+      data.observedLines.every((line) => object(line) && positiveId(line.id) && isNonEmptyString(line.text)))
     && object(data.lineRoutes) && Object.values(data.lineRoutes).every((routes) =>
       Array.isArray(routes) && routes.every((id) => Number.isSafeInteger(id) && id > 0));
 }

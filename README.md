@@ -9,7 +9,14 @@ at the server boundary. There is no application build step or database.
 
 ## Features
 
-- All discovered bus routes, colored by their Swedish line names. Route
+- Relevant discovered bus-route variants, colored by their Swedish line names.
+  The map shows observed trips in progress or within 30 minutes of their first
+  observed departure (or arrival when departure is missing), without requiring
+  a GPS fix. When stop-scan coverage is
+  unknown or expired, unverified routes are faded and a notice explains why.
+  This affects geometry only, not departures, bus markers or filter choices.
+  Boreal provides limited upcoming calls, not a complete timetable, so an
+  unreported trip cannot be predicted. Route
   geometry and map polylines are reused while browsing instead of rebuilding
   every route on updates. Differently colored routes sharing a road run in
   parallel lanes with a 1 px gap, returning to the road center where they
@@ -46,13 +53,15 @@ at the server boundary. There is no application build step or database.
   The dots stop moving when reduced motion is requested.
 - All bus stops shown as clickable circles; selecting one displays its
   departures and centers the map on that stop. Stops can also be selected
-  through autocomplete or a map click.
+  through autocomplete or a map click. One previously observed time may remain
+  grayed out after passing, explicitly unconfirmed; it does not mean a bus ran.
+  History is in memory only and may be absent.
 - Save favorite stops locally for one-tap arrivals, or ask for nearby stops
   using browser location permission.
 - In this map-first layout experiment, Lines and Find a stop are expandable
   buttons on the map. Only one panel opens at a time; close it with its
   button, the close control, Escape, or a click outside. The Lines button
-  shows the active line count; filters apply to routes, vehicle markers,
+  shows the number of lines with visible geometry; filters apply to routes, vehicle markers,
   and departure and bus cards. Find a stop contains text search, saved stops
   and a Near me button. Location is requested only by pressing Near me;
   results persist when closed and the same button can retry. Selecting a

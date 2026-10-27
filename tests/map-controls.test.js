@@ -299,7 +299,9 @@ test('line count and filtered styling update without losing keyboard checkbox fo
     })[id] ?? null,
   };
   try {
-    store.set({ lines: [{ id: 1, text: 'First' }, { id: 2, text: 'Second' }], activeLineIds: new Set([1, 2]) });
+    store.set({ lines: [{ id: 1, text: 'First' }, { id: 2, text: 'Second' }], activeLineIds: new Set([1, 2]),
+      lineRoutes: new Map([[1, new Set([11])], [2, new Set([22])]]),
+      routeGeometry: new Map([[11, {}], [22, {}]]), serviceView: { active: new Set(), complete: false } });
     initUi();
     assert.equal(buttonSummary.textContent, '2/2');
     assert.equal(filtered, false);

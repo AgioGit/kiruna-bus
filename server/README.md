@@ -44,6 +44,24 @@ Position fixes retain their
 GPS timestamp and disappear immediately after three minutes. Successful empty
 service, failed scans, missing fixes, and partial failures are distinct.
 
+Route service is inferred from the same collected stop calls, not GPS: for
+each observed journey and `(lineId, routeId)`, the window begins 30 minutes
+before its earliest observed departure (arrival if departure is missing) and
+ends at its latest observed arrival/departure. Each window expires six minutes
+after its oldest supporting stop response. When observations have different
+ages, fresher calls also support their own narrower windows. A per-route
+interval envelope retains the latest supporting expiry at each service instant,
+coalescing overlap without extending any unsupported portion.
+`service.completeUntil` is the expiry of the oldest response in the last
+complete, classifiable scan; incomplete scans can add positive evidence but
+cannot establish absence, and never extend that deadline. The browser hides
+unobserved variants only while complete coverage remains valid; otherwise it
+shows them faded with an unknown notice. Missing service fields from older
+servers are unknown. Geometry and manual filters remain independent.
+The source returns only limited upcoming calls, not a full timetable; if an
+origin or entire trip is not reported, its actual start or existence cannot be
+inferred reliably. Absolute timestamp instants handle timezone and DST changes.
+
 Collection intervals are scheduling targets, not snapshot expiry thresholds.
 The previous successful snapshot remains usable between cycles. Position
 collections become stale after three minutes without a refresh, scans after
@@ -68,7 +86,22 @@ Selected-stop departures are read immediately and after new dynamic
 publications, using the collector's complete per-stop response cache rather
 than starting another upstream call. Cancellation and disruption messages are
 preserved. Failed refreshes label retained departures stale, and departure
-responses and browser display expire after three minutes.
+responses and browser display expire after three minutes. The collector also
+keeps at most one latest passed observation per stop and up to 64 pending
+observations within 24 hours, within the same 16 MiB budget (live data takes
+priority). These are in memory only, may be absent after a restart or under
+memory pressure, and do not support live map routes. The optional
+`previousDeparture` has `call`, `observedAt`, `isStopCancelled`, and
+`messages` containing stop-wide notices and notices matching the call's ID and
+line ID when those scopes are present, but not notices targeting other calls or
+lines. Message `lines` contains objects with `lineId`, preserving the provider's
+line scope in both live and historical responses. General notices do not establish that
+the observed call was cancelled. Optional `pendingDepartures` contains similarly
+shaped future observations, solely so the browser can detect their deadlines;
+they are not live upcoming departures. Neither field confirms that a bus ran.
+When live data has expired but observations remain, `state` is `unavailable`,
+`calls` is empty, and `updatedAt` is an observation time, not live freshness.
+Without either live data or observations the endpoint still returns 503.
 
 ## Application API
 
@@ -79,10 +112,10 @@ It references the same [schemas.json](schemas.json) used by the server.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/bootstrap` | Basic catalog with schema/content version, capture time, provenance, source, and server time. |
-| `GET /api/v1/buses` | Cached vehicles, route associations, quality, epoch/revision, and catalog version. Registers activity but never waits for collection. |
+| `GET /api/v1/buses` | Cached vehicles, route associations, timestamped service evidence, observed line labels, quality, epoch/revision, and catalog version. Registers activity but never waits for collection. |
 | `GET /api/v1/stream` | Full `buses` SSE events and explicit `tracking-status` events; registers activity until disconnected. |
 | `GET /api/v1/stops` | Located stop catalog. |
-| `GET /api/v1/stops/:id/departures` | Flat departures, disruptions, cancellation state, `updatedAt`, and `fresh`/`stale` state. |
+| `GET /api/v1/stops/:id/departures` | Flat departures, disruptions, cancellation state, `updatedAt`, `fresh`/`stale`/`unavailable` state, and optional previous observation. |
 | `GET /api/v1/routes/:id` | Corrected display-ready geometry. |
 | `GET /api/v1/search?q=...` | Up to 20 catalog stop strings matching a name or number. |
 | `GET /api/v1/resolve?q=...` | Exact stop string lookup, or `null`. |
@@ -108,6 +141,25 @@ metadata identify a process epoch and monotonic publication revision; there is
 no replay history, and reconnection always resynchronizes with a full snapshot.
 `tracking-status` reports failure after headers have been sent, when an HTTP
 status can no longer change. A connected stream is not proof of fresh GPS.
+
+Both `buses` transports carry `service: {completeUntil, windows}`. Each window
+has `lineId`, `routeId`, `from`, `until`, and `expiresAt` ISO timestamps.
+`completeUntil: null` means there is no verified complete scan; an empty
+`windows` array is authoritative only before a non-null `completeUntil`.
+The original response timestamps, not `generatedAt`, heartbeats or duplicate
+snapshots, determine expiration. `observedLines` supplies line IDs and labels
+from calls, unexpired retained call evidence, and retained fresh vehicles when
+the static catalog has not discovered a line yet; retained vehicles do not
+imply current route service. Clients advance synchronized time from a monotonic
+clock rather than the device wall clock. Unbounded delayed samples cannot
+rewind it; an HTTP server-time header supplies a round-trip age bound for
+trusted backward corrections. A substantial backward discrepancy in an
+ordered stream snapshot triggers a throttled, single-flight cached `/buses`
+read, without initiating another upstream scan. A confirmed duplicate
+discrepancy does not trigger repeated reads, and HTTP `Retry-After` applies
+to clock recovery, watchdog reads, and visibility resumes. Service deadlines are
+re-evaluated after a trusted correction, while duplicate snapshots never
+reapply vehicle data.
 
 Snapshots advertise the static catalog content version. Clients re-fetch
 bootstrap when it changes; they do not receive route geometry in every push.

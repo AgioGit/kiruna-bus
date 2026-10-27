@@ -56,7 +56,8 @@ test('selected bus without more stops renders and refreshes without a disclosure
   }
 });
 
-test('late ETAs have an inline minute difference on bus, trip and departure cards', () => {
+test('late ETAs have an inline minute difference on bus, trip and departure cards', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-25T21:50:00Z') });
   const originalDocument = globalThis.document;
   const container = {
     innerHTML: '', hidden: false,
@@ -83,6 +84,7 @@ test('late ETAs have an inline minute difference on bus, trip and departure card
     };
     store.set({
       activeLineIds: new Set([1]), liveVehicles: [bus], selectedVehicleJourneyId: 42,
+      clockOffsetMs: 0, clockSynchronized: false,
       journeyStops: new Map([[42, [nextStop]]]),
       selectedStop: { id: 1, text: 'Center (1)' },
       calls: [{ id: '1', lineId: 1, line: '1', destination: 'Kiruna', departure: nextStop }],

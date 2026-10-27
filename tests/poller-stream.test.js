@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { api } from '../src/js/api.js';
+import { api, request } from '../src/js/api.js';
 import { store } from '../src/js/appState.js';
 import { resetTracking } from '../src/js/tracking.js';
 import { getLiveVehiclesSchedule, pausePolling, resumePolling } from '../src/js/poller.js';
+import { CLOCK_SAMPLE_MAX_AGE, now as clockNow, synchronizeClock } from '../src/js/clock.js';
+import { refreshBootstrap } from '../src/js/config.js';
+import { applyService, routeServiceStatus } from '../src/js/service.js';
+import { resetSelectedStopCalls } from '../src/js/calls.js';
 
 // A tiny, fully synchronous stand-in for the browser's EventSource: records
 // listeners per event type and lets tests fire them deterministically. No
@@ -49,12 +53,16 @@ function catalogFixture(version) {
 }
 
 function resetState() {
+  resetSelectedStopCalls();
   store.set({
-    liveVehicles: [], journeyStops: new Map(), selectedStop: null, calls: [], catalogInfo: null, liveQuality: null,
+    liveVehicles: [], journeyStops: new Map(), selectedStop: null, calls: [], previousDeparture: null,
+    messages: [], isStopCancelled: false, isCallsLoading: false, departuresUpdatedAt: null, catalogInfo: null, liveQuality: null,
+    clockOffsetMs: 0, clockSynchronized: false,
     errors: { config: null, lines: null, vehicles: null, routes: null, calls: null, stopNotFound: null, cache: null, stops: null },
   });
 }
 
+let testNow = Date.parse('2026-01-01T10:00:00Z');
 test.beforeEach((t) => {
   FakeEventSource.instances.length = 0;
   globalThis.EventSource = FakeEventSource;
@@ -62,9 +70,16 @@ test.beforeEach((t) => {
   resetState();
   t.mock.method(api, 'getStops', async () => []);
   t.mock.method(api, 'getBootstrap', async () => { throw new Error('Basic information unavailable'); });
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  testNow += 10 * 60000;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: testNow });
   t.mock.method(performance, 'now', () => Date.now());
-  t.after(() => { pausePolling(); delete globalThis.EventSource; });
+  t.after(() => {
+    pausePolling();
+    resetState();
+    synchronizeClock(new Date().toISOString());
+    applyService(null);
+    delete globalThis.EventSource;
+  });
 });
 
 async function flush() {
@@ -315,4 +330,415 @@ test('a catalog request completing after a hidden-tab pause cannot write state',
   resolve({ catalog, source: 'upstream', serverTime: new Date().toISOString() });
   await flush();
   assert.equal(store.get().catalogInfo, null);
+});
+
+test('fast bootstrap, warming HTTP and healthy SSE recover through one bounded cached HTTP read', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  const catalog = catalogFixture('cv-1');
+  const bootstrap = { catalog, source: 'test', serverTime: iso(start + 3600000) };
+  let resolveWarming, reads = 0;
+  const service = { completeUntil: iso(start + 180000), windows: [{
+    lineId: 1, routeId: 1, from: iso(start - 1000), until: iso(start + 300000), expiresAt: iso(start + 180000),
+  }] };
+  const bus = (time) => ({ key: 'bus', journeyId: 1, lineId: 1, routeId: 1, line: 'Line 1', destination: 'Town',
+    ageMs: 0, stale: false, position: { timestamp: iso(time), location: { lat: 10, lon: 10 } },
+    nextStop: { stopText: null, plannedTime: null, forecastTime: null }, followingStop: null, upcomingStops: [] });
+  const streamData = busesSnapshot({ revision: 1, serverTime: iso(start), generatedAt: iso(start),
+    vehicles: [bus(start)], service });
+  t.mock.method(globalThis, 'fetch', (url) => {
+    if (url.pathname.endsWith('/bootstrap')) {
+      return Promise.resolve(Response.json(bootstrap, { headers: { 'x-server-time': bootstrap.serverTime } }));
+    }
+    if (++reads === 1) return new Promise((resolve) => { resolveWarming = resolve; });
+    return Promise.resolve(Response.json(streamData, { headers: { 'x-server-time': iso(start) } }));
+  });
+  t.mock.method(api, 'getBootstrap', (opts) => request('/bootstrap', opts));
+  const fetchBuses = t.mock.method(api, 'getBuses', (opts) => request('/buses', opts));
+  t.mock.method(console, 'warn', () => {});
+  await refreshBootstrap({ force: true });
+  assert.equal(clockNow(), start + 3600000);
+  resumePolling();
+  const stream = FakeEventSource.instances[0];
+  stream.emit('buses', streamData);
+  assert.equal(fetchBuses.mock.callCount(), 1, 'do not overlap the initial request');
+  assert.equal(routeServiceStatus(store.get().serviceView, 1, 1), 'unknown');
+  assert.deepEqual(store.get().liveVehicles, []);
+  resolveWarming(Response.json({ error: { code: 'WARMING_UP', message: 'Warming up' } }, { status: 503 }));
+  await flush();
+  await flush();
+  await flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  assert.equal(clockNow(), start);
+  assert.equal(routeServiceStatus(store.get().serviceView, 1, 1), 'active');
+  assert.deepEqual(store.get().liveVehicles, [], 'duplicate HTTP data does not reapply vehicles');
+  t.mock.timers.tick(30000);
+  stream.emit('buses', { ...streamData, revision: 2, serverTime: iso(start + 30000), vehicles: [bus(start + 30000)] });
+  await flush();
+  assert.equal(store.get().liveVehicles.length, 1);
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  assert.equal(FakeEventSource.instances.length, 1);
+});
+
+test('clock recovery is single-flight, throttled and respects Retry-After despite repeated SSE', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let rejectRecovery, reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    const count = ++reads;
+    if (count === 1) return Promise.reject(Object.assign(new Error('Warming'), { code: 'WARMING_UP' }));
+    if (count === 2) return new Promise((_, reject) => { rejectRecovery = reject; });
+    const response = busesSnapshot({ revision: 6, serverTime: iso(start + 119999) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  stream.emit('buses', busesSnapshot({ revision: 1, serverTime: iso(start) }));
+  stream.emit('buses', busesSnapshot({ revision: 2, serverTime: iso(start) }));
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  rejectRecovery(Object.assign(new Error('Busy'), { retryAfter: 120000 }));
+  await flush();
+  await flush();
+  for (const [advance, revision] of [[30000, 3], [30000, 4], [30000, 5], [29999, 6]]) {
+    t.mock.timers.tick(advance);
+    stream.emit('buses', busesSnapshot({ revision, serverTime: iso(Date.now()) }));
+    await flush();
+    assert.equal(fetchBuses.mock.callCount(), 2);
+  }
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+  assert.equal(clockNow(), start + 119999);
+});
+
+test('a warming response Retry-After also throttles discrepancy recovery', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.reject(Object.assign(new Error('Warming'), { retryAfter: 20000 }));
+    const response = busesSnapshot({ revision: 2, serverTime: iso(start + 20000) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  stream.emit('buses', busesSnapshot({ revision: 1, serverTime: iso(start) }));
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(19999);
+  stream.emit('buses', busesSnapshot({ revision: 2, serverTime: iso(start + 19999) }));
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  assert.equal(clockNow(), start + 20000);
+});
+
+test('a bounded stale-revision HTTP sample can correct time without replacing newer stream data', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0, resolveRecovery;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.reject(new Error('Warming'));
+    return new Promise((resolve) => { resolveRecovery = resolve; });
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  stream.emit('buses', busesSnapshot({ revision: 1, serverTime: iso(start), error: 'older' }));
+  const service = { completeUntil: iso(start + 60000), windows: [{
+    lineId: 1, routeId: 1, from: iso(start), until: iso(start + 60000), expiresAt: iso(start + 60000),
+  }] };
+  stream.emit('buses', busesSnapshot({ revision: 2, serverTime: iso(start + 2000), error: null, service }));
+  const olderRevision = busesSnapshot({ revision: 1, serverTime: iso(start + 3000), error: 'older' });
+  Object.defineProperty(olderRevision, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+  resolveRecovery(olderRevision);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  assert.equal(clockNow(), start + 3000);
+  assert.equal(store.get().errors.vehicles, null);
+  assert.equal(routeServiceStatus(store.get().serviceView, 1, 1), 'active');
+});
+
+test('an older bounded HTTP sample cannot displace a newer ordered stream clock', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0, resolveRecovery;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.reject(new Error('Warming'));
+    if (reads === 2) return new Promise((resolve) => { resolveRecovery = resolve; });
+    const response = busesSnapshot({ revision: 3, serverTime: iso(start + 60000) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  stream.emit('buses', busesSnapshot({ revision: 1, serverTime: iso(start) }));
+  stream.emit('buses', busesSnapshot({ revision: 2, serverTime: iso(start + 3000) }));
+  const olderRevision = busesSnapshot({ revision: 1, serverTime: iso(start + 2000) });
+  Object.defineProperty(olderRevision, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+  resolveRecovery(olderRevision);
+  await flush();
+  await flush();
+  assert.equal(clockNow(), start + 3600000);
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  t.mock.timers.tick(59000);
+  stream.emit('buses', busesSnapshot({ revision: 3, serverTime: iso(start + 59000) }));
+  t.mock.timers.tick(1000);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+  assert.equal(clockNow(), start + 60000);
+});
+
+test('one bounded confirmation suppresses repeated identical delayed SSE but not a new discrepancy', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let revision = 5;
+  const service = { completeUntil: iso(start + 6000), windows: [{
+    lineId: 1, routeId: 1, from: iso(start - 1000), until: iso(start + 60000), expiresAt: iso(start + 6000),
+  }] };
+  const bus = { key: 'bus', journeyId: 1, lineId: 1, routeId: 1, line: 'Line', destination: 'Town',
+    ageMs: 179000, stale: false, position: { timestamp: iso(start - 179000), location: { lat: 10, lon: 10 } },
+    nextStop: { stopText: null, plannedTime: null, forecastTime: null }, followingStop: null, upcomingStops: [] };
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    const response = busesSnapshot({ revision, serverTime: iso(Date.now()), service, vehicles: [bus] });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  const old = busesSnapshot({ revision: 5, serverTime: iso(start - 120000), service, vehicles: [bus] });
+  stream.emit('buses', old);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  for (let i = 1; i <= 4; i++) {
+    t.mock.timers.tick(30000);
+    stream.emit('buses', old);
+    await flush();
+    assert.equal(fetchBuses.mock.callCount(), 2, `duplicate ${i} restarted resynchronization`);
+    assert.equal(routeServiceStatus(store.get().serviceView, 1, 1), 'unknown');
+    assert.deepEqual(store.get().liveVehicles, []);
+  }
+  revision = 6;
+  stream.emit('buses', { ...old, revision });
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+  assert.equal(clockNow(), start + 120000);
+});
+
+test('a bounded read started before an SSE discrepancy cannot confirm that discrepancy', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0, resolveInitial;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return new Promise((resolve) => { resolveInitial = resolve; });
+    const response = busesSnapshot({ revision: 1, serverTime: iso(start) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  const stream = FakeEventSource.instances[0];
+  const corrected = busesSnapshot({ revision: 1, serverTime: iso(start) });
+  stream.emit('buses', corrected);
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  const oldSample = busesSnapshot({ revision: 1, serverTime: iso(start + 3600000) });
+  Object.defineProperty(oldSample, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+  resolveInitial(oldSample);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  assert.equal(clockNow(), start);
+  stream.emit('buses', corrected);
+  t.mock.timers.tick(30000);
+  stream.emit('buses', corrected);
+  t.mock.timers.tick(30000);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+});
+
+test('a different discrepancy arriving during an in-flight confirmation remains pending', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0, resolveRecovery;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 2) return new Promise((resolve) => { resolveRecovery = resolve; });
+    const response = busesSnapshot({ revision: 1, serverTime: iso(Date.now()) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  const oldA = busesSnapshot({ revision: 1, serverTime: iso(start - 120000) });
+  const oldB = busesSnapshot({ revision: 1, serverTime: iso(start - 180000) });
+  stream.emit('buses', oldA);
+  stream.emit('buses', oldB);
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  const response = busesSnapshot({ revision: 1, serverTime: iso(start) });
+  Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+  resolveRecovery(response);
+  await flush();
+  await flush();
+  t.mock.timers.tick(30000);
+  stream.emit('buses', oldB);
+  t.mock.timers.tick(30000);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+});
+
+test('resync Retry-After blocks silent watchdog and visibility resume reads until its deadline', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  synchronizeClock(iso(start + 3600000));
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  let reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.resolve(busesSnapshot({ revision: 0, serverTime: iso(start + 3600000) }));
+    if (reads === 2) return Promise.reject(Object.assign(new Error('Busy'), { retryAfter: 120000 }));
+    const response = busesSnapshot({ revision: 1, serverTime: iso(start + 120000) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  FakeEventSource.instances[0].emit('buses', busesSnapshot({ revision: 1, serverTime: iso(start) }));
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  t.mock.timers.tick(60000);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2, 'watchdog bypassed Retry-After');
+  assert.equal(FakeEventSource.instances.length, 2, 'the SSE connection should still be retried');
+  pausePolling();
+  resumePolling();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2, 'visibility resume bypassed Retry-After');
+  t.mock.timers.tick(59999);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  t.mock.timers.tick(1);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+});
+
+test('HTTP-only visibility resume also honors a pending Retry-After', async (t) => {
+  delete globalThis.EventSource;
+  let reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.reject(Object.assign(new Error('Busy'), { retryAfter: 120000 }));
+    return Promise.resolve(busesSnapshot());
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(30000);
+  pausePolling();
+  resumePolling();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(89999);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(1);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+});
+
+test('a later authoritative clock change can reopen an identical discrepancy', async (t) => {
+  const start = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  store.set({ catalogInfo: { version: 'cv-1' } });
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    const response = busesSnapshot({ revision: 1, serverTime: iso(Date.now()) });
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return Promise.resolve(response);
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  const stream = FakeEventSource.instances[0];
+  const old = busesSnapshot({ revision: 1, serverTime: iso(start - 120000) });
+  stream.emit('buses', old);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  synchronizeClock(iso(start + 3600000), { maxAgeMs: 0 });
+  stream.emit('buses', old);
+  t.mock.timers.tick(30000);
+  stream.emit('buses', old);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+  t.mock.timers.tick(30000);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 3);
+  assert.equal(clockNow(), start + 60000);
+});
+
+test('HTTP-only fallback honors Retry-After even when it exceeds the normal backoff cap', async (t) => {
+  delete globalThis.EventSource;
+  let reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return Promise.reject(Object.assign(new Error('Busy'), { retryAfter: 600000 }));
+    return Promise.resolve(busesSnapshot());
+  });
+  resumePolling();
+  await flush();
+  await flush();
+  t.mock.timers.tick(300000);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(299999);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(1);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
+});
+
+test('a late Retry-After from a paused generation still gates the next resume', async (t) => {
+  let rejectOld, reads = 0;
+  const fetchBuses = t.mock.method(api, 'getBuses', () => {
+    if (++reads === 1) return new Promise((_, reject) => { rejectOld = reject; });
+    return Promise.resolve(busesSnapshot());
+  });
+  resumePolling();
+  pausePolling();
+  rejectOld(Object.assign(new Error('Busy'), { retryAfter: 120000 }));
+  await flush();
+  await flush();
+  resumePolling();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(119999);
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 1);
+  t.mock.timers.tick(1);
+  await flush();
+  await flush();
+  assert.equal(fetchBuses.mock.callCount(), 2);
 });

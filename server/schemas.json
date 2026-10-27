@@ -49,12 +49,21 @@
       },
       "anyOf": [{ "required": ["arrival"], "properties": { "arrival": { "type": "object" } } }, { "required": ["departure"], "properties": { "departure": { "type": "object" } } }]
     },
+    "departureMessage": {
+      "type": "object", "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "affectedCalls": { "type": "array", "items": { "type": "string" } },
+        "isDisturbance": { "type": "boolean" },
+        "lines": { "type": "array", "items": { "type": "object", "required": ["lineId"], "properties": { "lineId": { "type": "integer" } } } }
+      }
+    },
     "calls": {
       "type": "object", "required": ["calls"],
       "properties": {
         "calls": { "type": "array", "items": { "type": "object", "required": ["calls"], "properties": { "calls": { "type": "array", "items": { "$ref": "#/definitions/call" } } } } },
         "isStopCancelled": { "type": "boolean" },
-        "messages": { "type": "array", "items": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "affectedCalls": { "type": "array", "items": { "type": "string" } }, "isDisturbance": { "type": "boolean" } } } }
+        "messages": { "type": "array", "items": { "$ref": "#/definitions/departureMessage" } }
       }
     },
     "position": {
@@ -152,6 +161,22 @@
         "upcomingStops": { "type": "array", "items": { "$ref": "#/definitions/upcomingStop" } }
       }
     },
+    "service": {
+      "type": "object", "required": ["completeUntil", "windows"], "additionalProperties": false,
+      "properties": {
+        "completeUntil": { "type": ["string", "null"], "format": "date-time", "description": "Original full stop-scan coverage expiry; null means no verified complete scan." },
+        "windows": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": false, "required": ["lineId", "routeId", "from", "until", "expiresAt"],
+            "properties": {
+              "lineId": { "type": "integer", "minimum": 1 }, "routeId": { "type": "integer", "minimum": 1 },
+              "from": { "type": "string", "format": "date-time" }, "until": { "type": "string", "format": "date-time" },
+              "expiresAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
     "buses": {
       "type": "object", "required": ["generatedAt", "serverTime", "vehicles", "lineRoutes", "quality", "epoch", "revision", "catalogVersion"],
       "properties": {
@@ -160,6 +185,8 @@
         "catalogVersion": { "type": "string", "minLength": 1 },
         "generatedAt": { "type": "string", "format": "date-time" }, "serverTime": { "type": "string", "format": "date-time" },
         "lineRoutes": { "$ref": "#/definitions/lineRoutes" }, "quality": { "$ref": "#/definitions/quality" },
+        "service": { "$ref": "#/definitions/service" },
+        "observedLines": { "type": "array", "items": { "$ref": "#/definitions/line" } },
         "vehicles": { "type": "array", "items": { "$ref": "#/definitions/vehicle" } }
       }
     },
@@ -182,8 +209,19 @@
       "type": "object", "required": ["calls", "messages", "isStopCancelled", "updatedAt", "state"],
       "properties": {
         "calls": { "type": "array", "items": { "$ref": "#/definitions/call" } },
-        "messages": { "type": "array", "items": { "type": "object" } }, "isStopCancelled": { "type": "boolean" },
-        "updatedAt": { "type": "string", "format": "date-time" }, "state": { "enum": ["fresh", "stale"] }
+        "messages": { "type": "array", "items": { "$ref": "#/definitions/departureMessage" } }, "isStopCancelled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }, "state": { "enum": ["fresh", "stale", "unavailable"] },
+        "previousDeparture": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/departureObservation" }] },
+        "pendingDepartures": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/departureObservation" } }
+      }
+    },
+    "departureObservation": {
+      "type": "object", "required": ["call", "observedAt", "isStopCancelled", "messages"],
+      "properties": {
+        "call": { "$ref": "#/definitions/call" },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "isStopCancelled": { "type": "boolean" },
+        "messages": { "type": "array", "items": { "$ref": "#/definitions/departureMessage" } }
       }
     },
     "error": {

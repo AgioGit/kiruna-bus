@@ -1,7 +1,7 @@
 import { api, ApiError } from './api.js';
 import { store } from './appState.js';
 import { isCatalog, readCachedCatalog, writeCachedCatalog } from './catalog-cache.js';
-import { synchronizeClock } from './clock.js';
+import { CLOCK_SAMPLE_MAX_AGE, synchronizeClock } from './clock.js';
 import { clearSelectedStop } from './stops.js';
 
 let current = null;
@@ -21,15 +21,22 @@ export function applyCatalog(catalog, source) {
   configOptions = catalog.config;
   const state = store.get();
   const knownLines = new Set(state.lines.map((line) => line.id));
-  const activeLineIds = new Set(catalog.lines.filter((line) => !knownLines.has(line.id) || state.activeLineIds.has(line.id)).map((line) => line.id));
+  const lines = [...catalog.lines, ...state.lines.filter((line) => !catalog.lines.some((item) => item.id === line.id))];
+  const activeLineIds = new Set(lines.filter((line) => !knownLines.has(line.id) || state.activeLineIds.has(line.id)).map((line) => line.id));
+  const lineRoutes = new Map([...state.lineRoutes].map(([id, ids]) => [id, new Set(ids)]));
+  for (const [id, routes] of Object.entries(catalog.lineRoutes)) {
+    const ids = lineRoutes.get(Number(id)) ?? new Set();
+    routes.forEach((routeId) => ids.add(routeId));
+    lineRoutes.set(Number(id), ids);
+  }
   const selectedStop = state.selectedStop ? catalog.stops.find((stop) => stop.id === state.selectedStop.id) : null;
   if (state.selectedStop && !selectedStop) clearSelectedStop();
   store.set({
     ...(changed ? {
-      lines: catalog.lines, activeLineIds,
+      lines, activeLineIds,
       stopLocations: new Map(catalog.stops.map((stop) => [stop.id, { text: stop.text, location: stop.location }])),
-      lineRoutes: new Map(Object.entries(catalog.lineRoutes).map(([id, routes]) => [Number(id), new Set(routes)])),
-      routeGeometry: new Map(Object.entries(catalog.routes).map(([id, route]) => [Number(id), route])),
+      lineRoutes,
+      routeGeometry: new Map([...state.routeGeometry, ...Object.entries(catalog.routes).map(([id, route]) => [Number(id), route])]),
       ...(selectedStop ? { selectedStop } : {}),
     } : {}),
     catalogInfo: { source, capturedAt: catalog.capturedAt, version: catalog.version },
@@ -44,7 +51,7 @@ export async function refreshBootstrap({ signal, isCurrent = () => true, force =
   const data = await api.getBootstrap({ signal, timeoutMs: 5000 });
   if (signal?.aborted || !isCurrent()) return;
   if (!isCatalog(data?.catalog)) throw new ApiError('Basic map information is invalid.', { code: 'INVALID_CATALOG' });
-  synchronizeClock(data.serverTime);
+  synchronizeClock(data.serverTime, { maxAgeMs: data[CLOCK_SAMPLE_MAX_AGE] });
   if (applyCatalog(data.catalog, data.source)) await writeCachedCatalog(data.catalog).catch(storageError);
   return data;
 }

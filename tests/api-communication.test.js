@@ -6,6 +6,7 @@ import { store } from '../src/js/appState.js';
 import { failureDelay } from '../src/js/poller.js';
 import { isCatalog } from '../src/js/catalog-cache.js';
 import { readFileSync } from 'node:fs';
+import { CLOCK_SAMPLE_MAX_AGE } from '../src/js/clock.js';
 
 test('client timeout includes stalled response body and remains distinct from cancellation', async (t) => {
   t.mock.method(globalThis, 'fetch', async (_, { signal }) => ({
@@ -26,6 +27,16 @@ test('client preserves structured errors and retry timing', async (t) => {
   await assert.rejects(request('/buses'), { code: 'WARMING_UP', status: 503, retryAfter: 5000 });
   assert.equal(failureDelay(1, 5000, () => 0), 5000);
   assert.equal(failureDelay(20, undefined, () => 0.5), 300000);
+});
+
+test('HTTP server-time header carries a non-serialized round-trip age bound', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ serverTime: 'old' },
+    { headers: { 'x-server-time': '2026-01-01T10:00:00Z' } }));
+  const response = await request('/buses');
+  assert.equal(response.serverTime, '2026-01-01T10:00:00Z');
+  assert.ok(Number.isFinite(response[CLOCK_SAMPLE_MAX_AGE]));
+  assert.ok(response[CLOCK_SAMPLE_MAX_AGE] >= 0);
+  assert.equal(Object.keys(response).length, 1);
 });
 
 test('late live response cannot mutate state when request generation changed', async (t) => {

@@ -6,6 +6,7 @@ import { headingAlongRoute, pathToUpcomingStops } from './routeHeading.js';
 import { routePartsForVisibleRoutes } from './routeOverlap.js';
 import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from './routeOffset.js';
 import { selectVehicle } from './vehicleSelection.js';
+import { routeServiceStatus } from './service.js';
 
 let map = null;
 let tiles = null;
@@ -132,6 +133,7 @@ function render(state, prev) {
     : state.liveVehicles.find((bus) => bus.journeyId === state.selectedVehicleJourneyId)?.routeId ?? null;
   if (!prev || state.lineRoutes !== prev.lineRoutes || state.routeGeometry !== prev.routeGeometry ||
       state.activeLineIds !== prev.activeLineIds || state.lines !== prev.lines ||
+      state.serviceView !== prev.serviceView ||
       state.selectedVehicleJourneyId !== prev.selectedVehicleJourneyId ||
       selectedRouteId !== lastRenderedRouteId) {
     renderRoutes(state, selectedRouteId);
@@ -149,6 +151,7 @@ function render(state, prev) {
       state.journeyStops !== prev.journeyStops ||
       state.selectedVehicleJourneyId !== prev.selectedVehicleJourneyId ||
       state.hoveredVehicleJourneyId !== prev.hoveredVehicleJourneyId ||
+      state.serviceView !== prev.serviceView ||
       state.lineRoutes !== prev.lineRoutes || state.routeGeometry !== prev.routeGeometry ||
       state.stopLocations !== prev.stopLocations ||
       state.lines !== prev.lines) renderVehicles(state);
@@ -215,18 +218,20 @@ function renderRoutes(state, selectedRouteId) {
       const key = `${lineId}:${routeId}`;
       known.add(key);
       if (!state.activeLineIds.has(lineId)) continue;
+      const status = routeServiceStatus(state.serviceView, lineId, routeId);
+      if (status === 'inactive') continue;
       visible.add(key);
-      routes.push({ key, routeId, geometry, color: colorForLineId(lineId) });
+      routes.push({ key, routeId, geometry, color: colorForLineId(lineId), status });
     }
   }
   for (const route of routePartsForVisibleRoutes(routes)) {
-    const { key, geometry, color, layoutKey, pathOrder } = route;
+    const { key, geometry, color, layoutKey, pathOrder, status } = route;
     const selected = state.selectedVehicleJourneyId != null && route.routeId === selectedRouteId;
     const styleFor = () => ({
       pane: ROUTE_PANE,
       color,
       weight: selected ? 7 : ROUTE_WEIGHT,
-      opacity: selected ? 1 : 0.8,
+      opacity: status === 'unknown' ? 0.3 : selected ? 1 : 0.8,
     });
     let entry = routePolylines.get(key);
     if (!entry || entry.geometry !== geometry || entry.layoutKey !== layoutKey) {
@@ -234,7 +239,7 @@ function renderRoutes(state, selectedRouteId) {
       const renderedPaths = route.parts.map(routePaths);
       entry = {
         polylines: renderedPaths.map((paths) => L.polyline(paths, styleFor()).addTo(routeLayer)),
-        renderedPaths, parts: route.parts, geometry, layoutKey, color, selected, visible: true,
+        renderedPaths, parts: route.parts, geometry, layoutKey, color, selected, status, visible: true,
         pathOrder, renderedLocations: renderedRouteLocations(pathOrder, renderedPaths),
       };
       routePolylines.set(key, entry);
@@ -243,10 +248,11 @@ function renderRoutes(state, selectedRouteId) {
         entry.polylines.forEach((polyline) => polyline.addTo(routeLayer));
         entry.visible = true;
       }
-      if (entry.color !== color || entry.selected !== selected) {
+      if (entry.color !== color || entry.selected !== selected || entry.status !== status) {
         entry.polylines.forEach((polyline) => polyline.setStyle(styleFor()));
         entry.color = color;
         entry.selected = selected;
+        entry.status = status;
       }
     }
   }

@@ -23,7 +23,7 @@ function makeTrackerDouble(initialState = {}) {
   const state = {
     revision: 0,
     snapshotThrows: true,
-    snapshotValue: { vehicles: [] },
+    snapshotValue: { vehicles: [], service: { completeUntil: null, windows: [] }, observedLines: [] },
     quality: {
       state: 'unavailable', reasons: [], scan: { attempted: 0, succeeded: 0, failed: 0 },
       positions: { attempted: 0, succeeded: 0, failed: 0 }, lastScanAt: null, positionsAt: null, clockSynchronized: true,
@@ -233,6 +233,23 @@ test('a completed collector cycle pushes a fresh frame to an already-open connec
   assert.equal(updated.event, 'buses');
   assert.equal(updated.id, `${collector.epoch}:1`);
   assert.deepEqual(JSON.parse(updated.data).vehicles, trackerState.snapshotValue.vehicles);
+  req.destroy();
+});
+
+test('HTTP and SSE carry the same timestamped service evidence', async (t) => {
+  const { base, trackerState } = await serve(t);
+  const service = { completeUntil: '2026-10-25T01:06:00.000Z', windows: [{
+    lineId: 1, routeId: 42, from: '2026-10-25T00:20:00.000Z',
+    until: '2026-10-25T01:20:00.000Z', expiresAt: '2026-10-25T01:06:00.000Z',
+  }] };
+  trackerState.snapshotThrows = false;
+  trackerState.snapshotValue = { vehicles: [], service, observedLines: [{ id: 1, text: 'Röd.' }] };
+  const { req, res } = await openStream(base);
+  const frame = await sseReader(res).next();
+  const httpData = await (await fetch(`${base}/api/v1/buses`)).json();
+  assert.deepEqual(JSON.parse(frame.data).service, service);
+  assert.deepEqual(httpData.service, service);
+  assert.deepEqual(httpData.observedLines, [{ id: 1, text: 'Röd.' }]);
   req.destroy();
 });
 

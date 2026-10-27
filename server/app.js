@@ -79,18 +79,34 @@ function forecastDto(value) {
 // flattened, messages/cancellation preserved) into the public departures DTO.
 // `entry` is whatever `tracker.getStopCalls(id)` returned; the caller already
 // checked its age is within DEPARTURES_MAX_AGE_MS.
-export function departuresDto(entry, { nowMs, freshWithinMs }) {
+function callDto(call) {
   return {
-    calls: entry.calls.map((call) => ({
-      id: call.id, lineId: call.lineId, routeId: call.routeId ?? null, journeyId: call.journeyId,
-      sequenceNumber: call.sequenceNumber, line: call.line, destination: call.destination,
-      arrival: forecastDto(call.arrival), departure: forecastDto(call.departure),
-    })),
-    messages: (entry.messages ?? []).map(({ text, isDisturbance, affectedCalls }) =>
-      ({ text, isDisturbance: Boolean(isDisturbance), affectedCalls: affectedCalls ?? [] })),
+    id: call.id, lineId: call.lineId, routeId: call.routeId ?? null, journeyId: call.journeyId,
+    sequenceNumber: call.sequenceNumber, line: call.line, destination: call.destination,
+    arrival: forecastDto(call.arrival), departure: forecastDto(call.departure),
+  };
+}
+function messageDto({ text, isDisturbance, affectedCalls, lines }) {
+  return {
+    text, isDisturbance: Boolean(isDisturbance), affectedCalls: affectedCalls === undefined ? [] : affectedCalls,
+    lines: lines === undefined ? [] : lines.map(({ lineId }) => ({ lineId })),
+  };
+}
+function observationDto(observation) {
+  return {
+    ...observation, call: callDto(observation.call),
+    messages: observation.messages.map(messageDto),
+  };
+}
+export function departuresDto(entry, { nowMs, freshWithinMs, previousDeparture = null, pendingDepartures = [], unavailable = false }) {
+  return {
+    calls: unavailable ? [] : entry.calls.map(callDto),
+    messages: (entry.messages ?? []).map(messageDto),
     isStopCancelled: Boolean(entry.isStopCancelled),
     updatedAt: new Date(entry.at).toISOString(),
-    state: !entry.failed && nowMs - entry.at <= freshWithinMs ? 'fresh' : 'stale',
+    state: unavailable ? 'unavailable' : !entry.failed && nowMs - entry.at <= freshWithinMs ? 'fresh' : 'stale',
+    previousDeparture: previousDeparture ? observationDto(previousDeparture) : null,
+    pendingDepartures: pendingDepartures.map(observationDto),
   };
 }
 
@@ -250,11 +266,20 @@ export function createApplication({
         const stop = catalog.stop(id);
         collector.noteHttpActivity();
         const entry = tracker.getStopCalls(stop.id);
+        const history = tracker.getDepartureHistory?.(stop.id) ??
+          { previous: tracker.getPreviousDeparture?.(stop.id) ?? null, pending: [] };
+        const previousDeparture = history.previous;
+        const pendingDepartures = history.pending;
         const nowMs = now();
         if (!entry || nowMs - entry.at > DEPARTURES_MAX_AGE_MS) {
+          if (previousDeparture || pendingDepartures.length) {
+            return json(200, departuresDto({
+              calls: [], messages: [], isStopCancelled: false, at: Date.parse((previousDeparture ?? pendingDepartures[0]).observedAt),
+            }, { nowMs, freshWithinMs: settings.dynamicIntervalMs, previousDeparture, pendingDepartures, unavailable: true }), { schema: 'departures' });
+          }
           throw new AppError('DEPARTURES_UNAVAILABLE', 'Departure information is currently unavailable.', { status: 503, retryAfter: 5 });
         }
-        return json(200, departuresDto(entry, { nowMs, freshWithinMs: settings.dynamicIntervalMs }), { schema: 'departures' });
+        return json(200, departuresDto(entry, { nowMs, freshWithinMs: settings.dynamicIntervalMs, previousDeparture, pendingDepartures }), { schema: 'departures' });
       }
       if (pathname === '/api/v1/search' || pathname === '/api/v1/resolve') {
         method(['GET']); checkQuery(url, ['q']);

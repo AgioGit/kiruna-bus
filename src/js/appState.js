@@ -14,6 +14,7 @@ export const store = createStore({
   // the user typed something else over it) while unrelated poll-tick
   // re-renders still leave in-progress typing alone.
   calls: [], // flattened TransitCall[] for the selected stop
+  previousDeparture: null, // last observed passed call; never proof of service
   isCallsLoading: false,
   isStopCancelled: false,
   messages: [], // TrafficMessage[] for the selected stop
@@ -50,8 +51,10 @@ export const store = createStore({
   // each bus's `upcomingStops` in /api/buses (see live-vehicles.js).
 
   clockOffsetMs: 0, // serverTime - clientTime, from GetSystemTimestamp
+  clockSynchronized: false,
   catalogInfo: null,
   liveQuality: null,
+  serviceView: { active: new Set(), complete: false },
   departuresUpdatedAt: null,
 
   errors: {

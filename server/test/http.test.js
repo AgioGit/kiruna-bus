@@ -86,12 +86,15 @@ test('HTTP validation rejects invalid methods, query, media, coordinates and ove
 test('local search, resolve, nearby and normalized departure disruptions preserve semantics', async (t) => {
   const stop = snapshot.stops[0];
   const iso = new Date().toISOString();
+  const call = { id: 'a', lineId: snapshot.lines[0].id, journeyId: 1, sequenceNumber: 1,
+    line: 'Line', destination: 'Town', departure: { plannedTime: iso, forecastTime: iso } };
+  const message = { text: 'Disruption', isDisturbance: true, affectedCalls: ['a'],
+    lines: [{ lineId: call.lineId, lineName: 'Line', lineAppearance: { background: '#000000' } }] };
+  const observation = { call, observedAt: iso, isStopCancelled: true, messages: [message] };
   const { base } = await serve(t, { tracker: { getStopCalls: (id) => (id !== stop.id ? null : {
-    calls: [{ id: 'a', lineId: snapshot.lines[0].id, journeyId: 1, sequenceNumber: 1,
-      line: 'Line', destination: 'Town', departure: { plannedTime: iso, forecastTime: iso } }],
-    messages: [{ text: 'Disruption', isDisturbance: true, affectedCalls: ['a'] }], isStopCancelled: true,
+    calls: [call], messages: [message], isStopCancelled: true,
     at: Date.now(),
-  }) } });
+  }), getDepartureHistory: () => ({ previous: observation, pending: [observation] }) } });
   const results = await (await fetch(`${base}/api/v1/search?q=${encodeURIComponent(stop.text)}`)).json();
   assert.deepEqual(results, [stop.text]);
   assert.equal((await (await fetch(`${base}/api/v1/resolve?q=${encodeURIComponent(stop.text)}`)).json()).id, stop.id);
@@ -103,6 +106,10 @@ test('local search, resolve, nearby and normalized departure disruptions preserv
   assert.equal(departures.calls[0].id, 'a');
   assert.equal(departures.isStopCancelled, true);
   assert.deepEqual(departures.messages[0].affectedCalls, ['a']);
+  const normalizedMessage = { text: 'Disruption', isDisturbance: true, affectedCalls: ['a'], lines: [{ lineId: call.lineId }] };
+  assert.deepEqual(departures.messages[0], normalizedMessage);
+  assert.deepEqual(departures.previousDeparture.messages[0], normalizedMessage);
+  assert.deepEqual(departures.pendingDepartures[0].messages[0], normalizedMessage);
 });
 
 test('rate limits are explicit and probes remain accessible', async (t) => {
@@ -214,6 +221,40 @@ test('failed-stop departures preserve source time and expire only after the exac
   assert.equal(expired.status, 503);
   assert.equal(expired.headers.get('retry-after'), '5');
   assert.equal((await expired.json()).error.code, 'DEPARTURES_UNAVAILABLE');
+});
+
+test('expired live calls can expose historical observation without claiming a fresh response', async (t) => {
+  const time = Date.parse('2026-01-01T12:05:00Z');
+  const observedAt = new Date(time - 300000).toISOString();
+  const previous = { observedAt, isStopCancelled: false, messages: [],
+    call: { id: 'old', lineId: 1, journeyId: 1, sequenceNumber: 1, line: 'Red', destination: 'Town',
+      departure: { plannedTime: observedAt, forecastTime: observedAt } } };
+  const app = await serve(t, { now: () => time, tracker: {
+    getStopCalls: () => ({ calls: [previous.call], messages: [], isStopCancelled: false, at: time - 300000 }),
+    getPreviousDeparture: () => previous,
+  } });
+  const data = validate('departures', await (await fetch(`${app.base}/api/v1/stops/${snapshot.stops[0].id}/departures`)).json());
+  assert.equal(data.state, 'unavailable');
+  assert.deepEqual(data.calls, []);
+  assert.equal(data.updatedAt, observedAt);
+  assert.equal(data.previousDeparture.call.id, 'old');
+});
+
+test('pruned future observations survive unavailable live data without appearing as live calls', async (t) => {
+  const time = Date.parse('2026-01-01T12:05:00Z');
+  const observedAt = new Date(time - 300000).toISOString();
+  const pending = { observedAt, isStopCancelled: false, messages: [],
+    call: { id: 'pending', lineId: 1, journeyId: 1, sequenceNumber: 1, line: 'Red', destination: 'Town',
+      departure: { plannedTime: new Date(time + 60000).toISOString(), forecastTime: null } } };
+  const app = await serve(t, { now: () => time, tracker: {
+    getStopCalls: () => null,
+    getDepartureHistory: () => ({ previous: null, pending: [pending] }),
+  } });
+  const data = validate('departures', await (await fetch(`${app.base}/api/v1/stops/${snapshot.stops[0].id}/departures`)).json());
+  assert.equal(data.state, 'unavailable');
+  assert.deepEqual(data.calls, []);
+  assert.equal(data.previousDeparture, null);
+  assert.equal(data.pendingDepartures[0].call.id, 'pending');
 });
 
 test('draining rejects readiness without marking the process dead', async (t) => {

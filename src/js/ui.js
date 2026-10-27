@@ -1,11 +1,13 @@
 import { store } from './appState.js';
 import { toggleLine } from './filters.js';
 import { searchStops, selectStopByText, clearSelectedStop, cancelStopSearch } from './stops.js';
-import { formatTime, minutesUntil } from './clock.js';
+import { formatTime, minutesUntil, now } from './clock.js';
+import { effectiveDepartureTime } from './departure-history.js';
 import { colorForLineId, lineColorOrderForId, textColorForLineId } from './lineColors.js';
 import { selectVehicle } from './vehicleSelection.js';
 import { MAX_POSITION_AGE_MS } from './live-vehicles.js';
 import { showNotice } from './notices.js';
+import { visibleLineCount } from './service.js';
 
 const TRIP_PREVIEW_STOPS = 3;
 const TRANSIENT_ERRORS = new Set(['stopNotFound', 'cache']);
@@ -16,7 +18,9 @@ export function initUi() {
   wireSearch();
   wireVehicleCardClicks();
   store.subscribe((state, prev) => {
-    if (state.lines !== prev.lines || state.activeLineIds !== prev.activeLineIds) renderLineFilters(state);
+    if (state.lines !== prev.lines || state.activeLineIds !== prev.activeLineIds ||
+        state.serviceView !== prev.serviceView || state.lineRoutes !== prev.lineRoutes ||
+        state.routeGeometry !== prev.routeGeometry) renderLineFilters(state);
     renderStopSearchInput(state);
     if (state.liveVehicles !== prev.liveVehicles || state.activeLineIds !== prev.activeLineIds ||
         state.selectedVehicleJourneyId !== prev.selectedVehicleJourneyId ||
@@ -24,13 +28,14 @@ export function initUi() {
         state.liveQuality !== prev.liveQuality || state.errors.vehicles !== prev.errors.vehicles) {
       renderVehicleCards(state);
     }
-    if (state.calls !== prev.calls || state.selectedStop !== prev.selectedStop ||
+    if (state.calls !== prev.calls || state.previousDeparture !== prev.previousDeparture || state.selectedStop !== prev.selectedStop ||
         state.isStopCancelled !== prev.isStopCancelled || state.isCallsLoading !== prev.isCallsLoading ||
         state.messages !== prev.messages || state.errors.calls !== prev.errors.calls ||
         state.activeLineIds !== prev.activeLineIds || state.clockOffsetMs !== prev.clockOffsetMs) {
       renderArrivals(state);
     }
-    if (state.errors !== prev.errors || state.catalogInfo !== prev.catalogInfo || state.liveQuality !== prev.liveQuality) renderStatus(state);
+    if (state.errors !== prev.errors || state.catalogInfo !== prev.catalogInfo || state.liveQuality !== prev.liveQuality ||
+        state.serviceView !== prev.serviceView) renderStatus(state);
   });
   renderLineFilters(store.get());
   renderStopSearchInput(store.get());
@@ -270,7 +275,7 @@ function lineTextFor(state, lineId) {
 function renderLineFilters(state) {
   const container = document.getElementById('line-filters');
   if (!container) return;
-  const visible = state.lines.filter((line) => state.activeLineIds.has(line.id)).length;
+  const visible = visibleLineCount(state);
   const summary = document.getElementById('lines-summary');
   if (summary) {
     summary.textContent = state.lines.length ? `${visible} of ${state.lines.length} shown` : 'Loading lines';
@@ -423,28 +428,33 @@ function renderArrivals(state) {
   }
 
   const visibleCalls = state.calls
-    .filter((call) => state.activeLineIds.has(call.lineId))
+    .filter((call) => state.activeLineIds.has(call.lineId) &&
+      (!Number.isFinite(effectiveDepartureTime(call)) || effectiveDepartureTime(call) > now()))
     .sort((a, b) => {
       const aTime = plannedCallTime(a);
       const bTime = plannedCallTime(b);
       return aTime === bTime ? 0 : aTime - bTime;
     });
 
+  if (state.errors.calls) {
+    parts.push('<p class="hint" role="status">Departures could not be refreshed. Please try again soon.</p>');
+  }
   if (state.isCallsLoading && !visibleCalls.length) {
     parts.push('<p class="hint" role="status">Checking departures…</p>');
   } else if (!visibleCalls.length) {
-    const message = state.errors.calls ? 'Departures could not be refreshed. Please try again soon.'
-      : state.calls.length ? 'No departures match your line filters.' : 'No departures right now.';
-    parts.push(`<p class="hint">${message}</p>`);
+    if (!state.errors.calls) {
+      const hasUpcoming = state.calls.some((call) => !Number.isFinite(effectiveDepartureTime(call)) || effectiveDepartureTime(call) > now());
+      parts.push(`<p class="hint">${hasUpcoming ? 'No departures match your line filters.' : 'No upcoming departures.'}</p>`);
+    }
   } else {
     parts.push('<ul class="departure-list">');
     for (const call of visibleCalls) {
       const forecast = call.departure ?? call.arrival;
       const affected = affectedByCallId.get(call.id) ?? [];
-      const minutes = forecast ? minutesUntil(forecast.forecastTime) : null;
+      const minutes = forecast ? minutesUntil(forecast.forecastTime ?? forecast.plannedTime) : null;
       const countdown = minutes == null ? '' : minutes > 0 ? `In ${minutes} min`
         : minutes >= -1 ? 'Due now' : `${-minutes} min ago`;
-      const expected = forecast ? formatTime(forecast.forecastTime) : '—';
+      const expected = forecast ? formatTime(forecast.forecastTime ?? forecast.plannedTime) : '—';
       const planned = forecast ? formatTime(forecast.plannedTime) : '—';
       const delay = delayLabel(forecast?.plannedTime, forecast?.forecastTime);
       const bg = colorForLineId(call.lineId);
@@ -464,6 +474,31 @@ function renderArrivals(state) {
       parts.push('</li>');
     }
     parts.push('</ul>');
+  }
+
+  const previous = state.previousDeparture;
+  if (previous && state.activeLineIds.has(previous.call.lineId) && effectiveDepartureTime(previous.call) <= now()) {
+    const call = previous.call;
+    const generalMessages = previous.messages.filter((message) => !message.affectedCalls?.length && !message.lines?.length);
+    const lineMessages = previous.messages.filter((message) => !message.affectedCalls?.length && message.lines?.length);
+    const callMessages = previous.messages.filter((message) => message.affectedCalls?.length && message.affectedCalls.includes(call.id));
+    const forecast = call.departure ?? call.arrival;
+    const effective = Number.isFinite(Date.parse(forecast?.forecastTime)) ? forecast.forecastTime : forecast?.plannedTime;
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Stockholm', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const date = day.format(new Date(effective));
+    const dateLabel = date === day.format(new Date(now())) ? '' : ` · ${date}`;
+    parts.push(`<ul class="departure-list"><li class="departure-card departure-card--previous">
+      <div class="departure-main"><span class="line-badge">${escapeHtml(call.line)}</span>
+        <strong class="departure-destination">${escapeHtml(call.destination)}</strong>
+        <span class="departure-time"><span class="visually-hidden">Expected departure </span>${formatTime(effective)}</span></div>
+      <div class="departure-meta"><span>Time passed · departure unconfirmed${dateLabel}</span>
+        <span>Planned ${formatTime(forecast?.plannedTime)}</span>
+        ${forecast?.forecastTime ? `<span>Expected ${formatTime(forecast.forecastTime)}</span>` : ''}</div>
+      ${previous.isStopCancelled ? '<p class="departure-message">Stop departures were marked cancelled.</p>' : ''}
+      ${generalMessages.length ? `<p class="departure-message">General notice at the time: ${generalMessages.map((m) => escapeHtml(m.text)).join('; ')}</p>` : ''}
+      ${lineMessages.length ? `<p class="departure-message">Notice for this line at the time: ${lineMessages.map((m) => escapeHtml(m.text)).join('; ')}</p>` : ''}
+      ${callMessages.length ? `<p class="departure-message">Notice for this call: ${callMessages.map((m) => escapeHtml(m.text)).join('; ')}</p>` : ''}
+    </li></ul>`);
   }
 
   content.innerHTML = parts.join('');
@@ -493,6 +528,9 @@ function renderStatus(state) {
   const container = document.getElementById('status-banner');
   if (!container) return;
   const messages = [];
+  if (!state.serviceView?.complete) {
+    messages.push(['service', 'Route service is unknown; unverified routes are shown faded.']);
+  }
   if (state.catalogInfo && state.catalogInfo.source !== 'upstream') {
     messages.push(['catalog', `Cached basic map information from ${new Date(state.catalogInfo.capturedAt).toLocaleString('sv-SE')}. Live data loads separately.`]);
   }

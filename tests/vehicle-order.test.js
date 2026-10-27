@@ -57,7 +57,8 @@ test('live buses stay grouped by line color and journey as ETAs change', () => {
   }
 });
 
-test('stop departures sort by planned instants, not live ETAs, without mutating calls', () => {
+test('stop departures sort by planned instants, not live ETAs, without mutating calls', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-13T20:30:00Z') });
   const originalDocument = globalThis.document;
   const arrivals = { innerHTML: '', hidden: false };
   const arrivalsPanel = { hidden: false };
@@ -88,7 +89,8 @@ test('stop departures sort by planned instants, not live ETAs, without mutating 
   const displayedDestinations = () =>
     [...arrivals.innerHTML.matchAll(/class="departure-destination">([^<]+)</g)].map((match) => match[1]);
   try {
-    store.set({ selectedStop: { id: 1, text: 'Center (1)' }, calls, activeLineIds: new Set([1]) });
+    store.set({ selectedStop: { id: 1, text: 'Center (1)' }, calls, activeLineIds: new Set([1]),
+      clockOffsetMs: 0, clockSynchronized: false });
     initUi();
     const expected = ['Arrival only', 'Earlier', 'Equal', 'Later', 'Missing', 'Invalid'];
     assert.deepEqual(displayedDestinations(), expected);

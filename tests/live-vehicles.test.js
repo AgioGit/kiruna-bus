@@ -6,6 +6,9 @@ import {
 import { api } from '../src/js/api.js';
 import { store } from '../src/js/appState.js';
 import { resetTracking } from '../src/js/tracking.js';
+import { CLOCK_SAMPLE_MAX_AGE, now as clockNow } from '../src/js/clock.js';
+import { refreshBootstrap } from '../src/js/config.js';
+import { readFileSync } from 'node:fs';
 
 test('buildJourneyStops maps each journey to its upcoming stops', () => {
   const stops = [{ stopText: 'A', sequenceNumber: 1, plannedTime: null, forecastTime: null }];
@@ -38,6 +41,7 @@ test('position freshness includes exactly three minutes, but hides older or unda
 test('a retained bus expires between polls without changing its updated timestamp', async (t) => {
   const now = Date.parse('2026-01-01T10:00:00Z');
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: now + 3600_000 });
+  store.set({ clockOffsetMs: 0, clockSynchronized: false });
   t.mock.method(performance, 'now', () => Date.now());
   const timestamp = new Date(now - 179_000).toISOString();
   const bus = { journeyId: 7, position: { timestamp }, upcomingStops: [{ stopText: 'A' }] };
@@ -57,8 +61,9 @@ test('a retained bus expires between polls without changing its updated timestam
 });
 
 test('a newer fetch replaces the expiry timer and removes already-expired buses', async (t) => {
-  const now = Date.parse('2026-01-01T10:00:00Z');
+  const now = Date.parse('2026-01-02T10:00:00Z');
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  store.set({ clockOffsetMs: 0, clockSynchronized: false });
   t.mock.method(performance, 'now', () => Date.now());
   const bus = (age) => ({ journeyId: 7, position: { timestamp: new Date(now - age).toISOString() } });
   t.mock.method(api, 'getBuses', async () => snapshot({
@@ -116,6 +121,7 @@ test('acceptBusesSnapshot: a stale revision is ignored and never reaches state',
 test('acceptBusesSnapshot: an equal (duplicate) revision is valid evidence but never resurrects expired state', async (t) => {
   const now = Date.parse('2026-01-01T10:00:00Z');
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  store.set({ clockOffsetMs: 0, clockSynchronized: false });
   t.mock.method(performance, 'now', () => Date.now());
   resetTracking();
   t.after(resetTracking);
@@ -135,9 +141,12 @@ test('acceptBusesSnapshot: an equal (duplicate) revision is valid evidence but n
 });
 
 test('acceptBusesSnapshot: a new epoch always applies, even with a lower revision number', (t) => {
-  const now = Date.parse('2026-01-01T10:00:00Z');
+  const now = Date.parse('2026-01-04T10:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  t.mock.method(performance, 'now', () => Date.now());
+  store.set({ clockOffsetMs: 0, clockSynchronized: false });
   resetTracking();
-  t.after(resetTracking);
+  t.after(() => { resetTracking(); store.set({ clockOffsetMs: 0, clockSynchronized: false }); });
   acceptBusesSnapshot(snapshot({ epoch: 'epoch-a', revision: 99, vehicles: [], serverTime: new Date(now).toISOString() }));
   const bus = { journeyId: 2, position: { timestamp: new Date(now).toISOString() } };
   const result = acceptBusesSnapshot(snapshot({
@@ -145,4 +154,93 @@ test('acceptBusesSnapshot: a new epoch always applies, even with a lower revisio
   }));
   assert.equal(result.outcome, 'new-epoch');
   assert.equal(store.get().liveVehicles.length, 1);
+});
+
+test('a newer revision with an old server timestamp cannot resurrect an expired position', (t) => {
+  const start = Date.parse('2026-01-05T10:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: start });
+  t.mock.method(performance, 'now', () => Date.now());
+  store.set({ clockOffsetMs: 0, clockSynchronized: false });
+  resetTracking();
+  t.after(() => { resetTracking(); store.set({ clockOffsetMs: 0, clockSynchronized: false }); });
+  const bus = { journeyId: 7, position: { timestamp: new Date(start).toISOString() } };
+  const data = snapshot({ epoch: 'delayed-newer', revision: 1, vehicles: [bus], serverTime: new Date(start).toISOString() });
+  acceptBusesSnapshot(data);
+  t.mock.timers.setTime(start + MAX_POSITION_AGE_MS + 1);
+  assert.equal(acceptBusesSnapshot({ ...data, revision: 2 }).outcome, 'newer');
+  assert.equal(store.get().liveVehicles.length, 0);
+});
+
+test('bootstrap clock changes expire vehicles; newer snapshots use the corrected clock', async (t) => {
+  const start = Date.parse('2026-01-03T10:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: start });
+  t.mock.method(performance, 'now', () => Date.now());
+  store.set({ clockOffsetMs: 0, clockSynchronized: false, liveVehicles: [] });
+  resetTracking();
+  t.after(() => { resetTracking(); store.set({ clockOffsetMs: 0, clockSynchronized: false }); });
+  const bus = { journeyId: 7, position: { timestamp: new Date(start).toISOString() },
+    upcomingStops: [{ stopText: 'A', plannedTime: null, forecastTime: null }] };
+  const data = snapshot({ epoch: 'bootstrap-expiry', revision: 1, vehicles: [bus], serverTime: new Date(start).toISOString() });
+  acceptBusesSnapshot(data);
+  assert.equal(store.get().liveVehicles.length, 1);
+  assert.equal(store.get().journeyStops.size, 1);
+  const catalog = JSON.parse(readFileSync(new URL('../server/data/bootstrap.json', import.meta.url), 'utf8'));
+  let serverTime = start + 300000;
+  t.mock.method(api, 'getBootstrap', async () => {
+    const response = { catalog, source: 'test', serverTime: new Date(serverTime).toISOString() };
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return response;
+  });
+  t.mock.method(console, 'warn', () => {});
+  await refreshBootstrap({ force: true });
+  assert.equal(clockNow(), start + 300000);
+  assert.deepEqual(store.get().liveVehicles, []);
+  assert.equal(store.get().journeyStops.size, 0);
+
+  serverTime = start + 60000;
+  await refreshBootstrap({ force: true });
+  assert.equal(clockNow(), start + 60000);
+  acceptBusesSnapshot(data);
+  assert.deepEqual(store.get().liveVehicles, []);
+  acceptBusesSnapshot({ ...data, revision: 2 });
+  assert.equal(store.get().liveVehicles.length, 1);
+  acceptBusesSnapshot({ ...data, revision: 3, vehicles: [] });
+  assert.deepEqual(store.get().liveVehicles, []);
+  acceptBusesSnapshot({ ...data, revision: 4 });
+  assert.equal(store.get().liveVehicles.length, 1);
+  const fresh = { ...bus, position: { timestamp: new Date(serverTime).toISOString() } };
+  acceptBusesSnapshot(snapshot({ epoch: 'bootstrap-expiry', revision: 5, vehicles: [fresh],
+    serverTime: new Date(serverTime).toISOString() }));
+  assert.equal(store.get().liveVehicles.length, 1);
+  t.mock.timers.tick(MAX_POSITION_AGE_MS);
+  assert.equal(store.get().liveVehicles.length, 1);
+  t.mock.timers.tick(1);
+  assert.deepEqual(store.get().liveVehicles, []);
+  t.mock.timers.tick(10000);
+  assert.deepEqual(store.get().liveVehicles, []);
+});
+
+test('bootstrap clock correction reschedules a still-fresh vehicle at its original GPS deadline', async (t) => {
+  const start = Date.parse('2026-01-06T10:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: start });
+  t.mock.method(performance, 'now', () => Date.now());
+  store.set({ clockOffsetMs: 0, clockSynchronized: false, liveVehicles: [] });
+  resetTracking();
+  t.after(() => { resetTracking(); store.set({ clockOffsetMs: 0, clockSynchronized: false }); });
+  const bus = { journeyId: 7, position: { timestamp: new Date(start).toISOString() } };
+  acceptBusesSnapshot(snapshot({ epoch: 'bootstrap-reschedule', revision: 1, vehicles: [bus],
+    serverTime: new Date(start).toISOString() }));
+  const catalog = JSON.parse(readFileSync(new URL('../server/data/bootstrap.json', import.meta.url), 'utf8'));
+  t.mock.method(api, 'getBootstrap', async () => {
+    const response = { catalog, source: 'test', serverTime: new Date(start + 120000).toISOString() };
+    Object.defineProperty(response, CLOCK_SAMPLE_MAX_AGE, { value: 0 });
+    return response;
+  });
+  t.mock.method(console, 'warn', () => {});
+  await refreshBootstrap({ force: true });
+  assert.equal(store.get().liveVehicles.length, 1);
+  t.mock.timers.tick(60000);
+  assert.equal(store.get().liveVehicles.length, 1);
+  t.mock.timers.tick(1);
+  assert.deepEqual(store.get().liveVehicles, []);
 });

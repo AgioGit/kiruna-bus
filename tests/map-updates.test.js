@@ -279,4 +279,12 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.ok(groups[3].removed.includes(lastProjection));
   store.set({ hoveredVehicleJourneyId: 7, liveVehicles: [] });
   assert.ok(groups[2].removed.includes(visibleMarker));
+  const geometryBefore = store.get().routeGeometry;
+  const choicesBefore = store.get().activeLineIds;
+  store.set({ serviceView: { complete: true, active: new Set(['123:456']) } });
+  assert.ok(routeLayer.removed.includes(sharedPaths[1]));
+  assert.equal(store.get().routeGeometry, geometryBefore);
+  assert.equal(store.get().activeLineIds, choicesBefore);
+  store.set({ serviceView: { complete: false, active: new Set() } });
+  assert.equal(sharedPaths[1].options.opacity, 0.3);
 });

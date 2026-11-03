@@ -25,7 +25,7 @@ export function normalizeTraffic(data) {
 }
 
 export function createTrafficInfo({ origin = 'https://lokaltrafikenkiruna.se', fetcher = fetch, now = Date.now,
-  monotonic = now === Date.now ? () => performance.now() : now, telemetry, timeoutMs = 10000 } = {}) {
+  monotonic = now === Date.now ? () => performance.now() : now, telemetry, timeoutMs = 10000, upstreamDebug } = {}) {
   let lastGood = null, nextAttempt = 0, failures = 0, failed = false, inFlight = null, controller = null, closed = false;
 
   async function refresh() {
@@ -33,31 +33,38 @@ export function createTrafficInfo({ origin = 'https://lokaltrafikenkiruna.se', f
     nextAttempt = startedMono + INTERVAL;
     controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const url = `${origin}/wp-json/boreal/v1/trafikinfo`;
+    const trace = upstreamDebug?.start({ provider: 'lokaltrafiken', url });
     try {
-      const response = await fetcher(`${origin}/wp-json/boreal/v1/trafikinfo`, { signal: controller.signal, cache: 'no-store', redirect: 'error' });
+      const response = await fetcher(url, { signal: controller.signal, cache: 'no-store', redirect: 'error' });
+      trace?.response(response);
       if (!response.ok) {
         const value = response.headers.get('retry-after');
         const seconds = /^\d+$/.test(value ?? '') ? Number(value) : (Date.parse(value) - now()) / 1000;
         if (Number.isFinite(seconds)) nextAttempt = Math.max(nextAttempt, Math.min(Number.MAX_SAFE_INTEGER, monotonic() + Math.max(0, seconds) * 1000));
-        await response.body?.cancel();
+        if (trace) await trace.errorBody(response);
+        else await response.body?.cancel();
         throw new Error('Upstream HTTP failure');
       }
       const length = Number(response.headers.get('content-length'));
-      if (length > MAX_BYTES) { controller.abort(); throw new Error('Response too large'); }
+      if (length > MAX_BYTES) { trace?.truncate(); controller.abort(); throw new Error('Response too large'); }
       const chunks = [];
       let size = 0;
       for await (const chunk of response.body) {
+        trace?.chunk(chunk);
         size += chunk.length;
         if (size > MAX_BYTES) { controller.abort(); throw new Error('Response too large'); }
         chunks.push(chunk);
       }
+      trace?.complete();
       const data = normalizeTraffic(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       if (closed) return;
       // Include the complete request duration rather than making data younger in transit.
       lastGood = { ...data, at: started, atMono: startedMono, elapsed: 0 };
       failed = false;
       failures = 0;
-    } catch {
+    } catch (error) {
+      trace?.fail(error);
       if (closed) return;
       failed = true;
       failures++;
@@ -65,6 +72,7 @@ export function createTrafficInfo({ origin = 'https://lokaltrafikenkiruna.se', f
       telemetry?.count('trafficInfoFailures');
       telemetry?.log('traffic_info_refresh_failed', { code: 'TRAFFIC_INFO_UNAVAILABLE' });
     } finally {
+      trace?.finish();
       clearTimeout(timer);
       controller = null;
     }

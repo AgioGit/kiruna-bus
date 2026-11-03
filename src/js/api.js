@@ -71,6 +71,7 @@ export const api = {
   getBootstrap: (opts) => request('/bootstrap', opts),
   getBuses: (opts) => request('/buses', opts),
   getTrafficInfo: (opts) => request('/traffic-info', opts),
+  getUpstreamDebug: (opts) => request('/debug/upstream', opts),
   getStops: (opts) => request('/stops', opts),
   getMapRoute: (id, opts) => request(`/routes/${encodeURIComponent(id)}`, opts),
   getCalls: ({ stopId }, opts) => request(`/stops/${encodeURIComponent(stopId)}/departures`, opts),

@@ -115,6 +115,19 @@
     </aside>
   </main>
 
+  <details id="upstream-debug" class="upstream-debug" hidden open>
+    <summary>Local upstream debug</summary>
+    <div class="debug-controls">
+      <label for="debug-call-filter">Call</label>
+      <select id="debug-call-filter"><option value="">All calls</option></select>
+      <button id="debug-pause" type="button" aria-pressed="false">Pause updates</button>
+    </div>
+    <p id="debug-status" class="hint" role="status"></p>
+    <p id="debug-error" class="traffic-info-warning" role="alert" hidden></p>
+    <label class="visually-hidden" for="debug-json">Upstream request and response pairs as JSON</label>
+    <textarea id="debug-json" readonly spellcheck="false" wrap="off"></textarea>
+  </details>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>

@@ -8,6 +8,17 @@
   "jsonSchemaDialect": "http://json-schema.org/draft-07/schema#",
   "servers": [{ "url": "/" }],
   "paths": {
+    "/api/v1/debug/upstream": {
+      "get": {
+        "operationId": "debugUpstream",
+        "summary": "Read opt-in local upstream request/response capture",
+        "description": "Available only with LOCAL_DEBUG=true on a loopback-bound, non-production server without trusted proxy support. Rejects non-local Host, socket, and cross-origin requests. Disabled servers return 404. Reads never activate collection or contact providers. Keeps at most 100 completed outbound attempts and 2 MiB in memory; each body is limited to 64 KiB with explicit truncation flags. Includes HTTP/network failures and individual retries, not cache hits. Recognized sensitive headers, query parameters, and JSON fields are redacted. No history is persisted.",
+        "responses": {
+          "200": { "description": "Bounded captured pairs", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/upstreamDebug" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/api/v1/traffic-info": {
       "get": {
         "operationId": "trafficInfo",

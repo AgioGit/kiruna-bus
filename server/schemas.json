@@ -2,6 +2,42 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://boreal-bus.local/schemas",
   "definitions": {
+    "upstreamDebug": {
+      "type": "object", "required": ["entries", "dropped"], "additionalProperties": false,
+      "properties": {
+        "dropped": { "type": "integer", "minimum": 0 },
+        "entries": { "type": "array", "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "provider", "call", "startedAt", "durationMs", "request", "response", "error"],
+          "properties": {
+            "id": { "type": "integer", "minimum": 1 },
+            "provider": { "enum": ["boreal", "lokaltrafiken"] },
+            "call": { "type": "string" },
+            "startedAt": { "type": "string", "format": "date-time" },
+            "durationMs": { "type": "integer", "minimum": 0 },
+            "request": {
+              "type": "object", "required": ["method", "url", "headers", "body", "bodyTruncated"],
+              "properties": {
+                "method": { "type": "string" }, "url": { "type": "string" },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "body": {}, "bodyTruncated": { "type": "boolean" }
+              }
+            },
+            "response": { "anyOf": [{ "type": "null" }, {
+              "type": "object", "required": ["status", "headers", "body", "bodyTruncated"],
+              "properties": {
+                "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "body": {}, "bodyTruncated": { "type": "boolean" }
+              }
+            }] },
+            "error": { "anyOf": [{ "type": "null" }, {
+              "type": "object", "required": ["code"], "properties": { "code": { "type": "string" } }
+            }] }
+          }
+        } }
+      }
+    },
     "trafficUpstream": {
       "type": "object", "required": ["turer", "meddelanden", "ageSec"],
       "properties": {

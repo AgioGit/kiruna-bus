@@ -13,6 +13,7 @@ import { AppError } from './lib/errors.js';
 import { createTelemetry } from './lib/telemetry.js';
 import { validate } from './lib/validation.js';
 import { createTrafficInfo } from './lib/trafficInfo.js';
+import { createUpstreamDebug } from './lib/upstreamDebug.js';
 
 const POST_ENDPOINTS = new Set(['/GetStopAreas', '/GetCalls', '/FindStopArea', '/FindStopsNearLocation']);
 // Departures are served from the shared collector's per-stop call cache
@@ -113,12 +114,13 @@ export function departuresDto(entry, { nowMs, freshWithinMs, previousDeparture =
 
 export function createApplication({
   settings = config, telemetry = createTelemetry(), now = Date.now,
-  api = createBoreal({ settings, telemetry, now }),
+  upstreamDebug = settings.localDebug ? createUpstreamDebug({ now }) : null,
+  api = createBoreal({ settings, telemetry, now, upstreamDebug }),
   catalog = createCatalog({ snapshot: loadCatalog(settings.snapshotPath), api, telemetry, now, refreshTimeoutMs: settings.refreshTimeoutMs }),
   tracker = createTracker({ api, initialStops: catalog.get().stops, stopSource: () => catalog.get().stops,
     telemetry, now, options: { refreshTimeoutMs: settings.refreshTimeoutMs } }),
   collector = createCollector({ tracker, catalog, telemetry, now, config: settings }),
-  trafficInfo = createTrafficInfo({ origin: settings.trafficInfoOrigin, telemetry, now }),
+  trafficInfo = createTrafficInfo({ origin: settings.trafficInfoOrigin, telemetry, now, upstreamDebug }),
 } = {}) {
   const passthrough = createPassthrough({ request: api.request });
   const streamHub = createStreamHub({
@@ -210,9 +212,18 @@ export function createApplication({
       }
       route = pathname.startsWith('/api/v1/stops/') ? '/api/v1/stops/:id/departures'
         : pathname.startsWith('/api/v1/routes/') ? '/api/v1/routes/:id'
-          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/stream', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby', '/api/v1/traffic-info',
+          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/stream', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby', '/api/v1/traffic-info', '/api/v1/debug/upstream',
             '/api/live', '/api/ready', '/api/status', '/api/health', '/api/buses', '/api/stops'].includes(pathname)
             || PASSTHROUGH_ENDPOINTS.has(pathname.slice(4)) ? pathname : 'unknown_api';
+      if (pathname === '/api/v1/debug/upstream') {
+        if (!settings.localDebug) throw new AppError('NOT_FOUND', 'Unknown endpoint', { status: 404 });
+        const host = req.headers.host ?? '';
+        if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) ||
+            !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host) ||
+            (origin && origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site') {
+          throw new AppError('DEBUG_LOCAL_ONLY', 'Debug capture is available only to the local application.', { status: 403 });
+        }
+      }
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -236,6 +247,10 @@ export function createApplication({
       }
       if (draining) throw new AppError('SHUTTING_DOWN', 'Server is shutting down', { status: 503, retryAfter: 5 });
       rateLimit(req);
+      if (pathname === '/api/v1/debug/upstream') {
+        method(['GET']); checkQuery(url);
+        return json(200, upstreamDebug.snapshot(), { schema: 'upstreamDebug', headers: { 'Cache-Control': 'no-store' } });
+      }
       if (pathname === '/api/v1/traffic-info') {
         method(['GET']); checkQuery(url);
         const { data, retryAfter } = await trafficInfo.get();
@@ -370,7 +385,7 @@ export function createApplication({
   });
   server.timeout = 30000;
   return {
-    server, tracker, catalog, api, collector,
+    server, tracker, catalog, api, collector, upstreamDebug,
     shutdown() {
       draining = true;
       collector.close();
@@ -379,6 +394,7 @@ export function createApplication({
       catalog.close();
       api.close();
       trafficInfo.close();
+      upstreamDebug?.close();
     },
   };
 }

@@ -28,6 +28,12 @@ export function loadConfig(env = process.env) {
     if (origin !== '*' && new URL(origin).origin !== origin) throw new Error('ALLOWED_ORIGINS must contain origins');
   }
   if (env.TRUST_PROXY && !['true', 'false'].includes(env.TRUST_PROXY)) throw new Error('TRUST_PROXY must be true or false');
+  if (env.LOCAL_DEBUG && !['true', 'false'].includes(env.LOCAL_DEBUG)) throw new Error('LOCAL_DEBUG must be true or false');
+  const host = env.HOST ?? '0.0.0.0';
+  const localDebug = env.LOCAL_DEBUG === 'true';
+  if (localDebug && (!['127.0.0.1', '::1', 'localhost'].includes(host) || env.TRUST_PROXY === 'true' || env.NODE_ENV === 'production')) {
+    throw new Error('LOCAL_DEBUG requires a loopback HOST, TRUST_PROXY=false, and a non-production environment');
+  }
   for (const name of ['HOST', 'BOREAL_PROFILE_DATA', 'BOREAL_PROFILE_DISPLAY', 'SNAPSHOT_PATH', 'STATIC_DIR']) {
     if (env[name] !== undefined && !env[name].trim()) throw new Error(`${name} cannot be empty`);
   }
@@ -42,7 +48,8 @@ export function loadConfig(env = process.env) {
     streamSlowReaderMs: integer('STREAM_SLOW_READER_MS', 5000, 500, 60000),
     streamMaxPendingBytes: integer('STREAM_MAX_PENDING_BYTES', 262144, 1024, 10 * 1024 * 1024),
     port: integer('PORT', 8080, 0, 65535),
-    host: env.HOST ?? '0.0.0.0',
+    host,
+    localDebug,
     borealBase: borealBase.replace(/\/+$/, ''),
     trafficInfoOrigin: trafficOrigin,
     profileData: env.BOREAL_PROFILE_DATA ?? 'boreal_kiruna',

@@ -52,6 +52,26 @@ Ajv. Upstream validation accepts harmless additional fields but requires valid
 essential coordinates, identifiers, timestamps, and shapes. Application DTOs
 are normalized before they reach the browser.
 
+## Optional local upstream capture
+
+`LOCAL_DEBUG=true` on a loopback-bound non-production server creates one shared
+`upstreamDebug.js` recorder, injected into both upstream adapters. Each actual
+outbound attempt contributes one completed request/response pair, including
+HTTP failures, partial bodies, retries, or network errors. Cache hits do not.
+Capture does not duplicate requests or change collection activity.
+
+The recorder redacts recognized credential fields and bounds body previews,
+entry count, and serialized bytes. It stores nothing on disk and is cleared at
+shutdown. Its read-only `/api/v1/debug/upstream` endpoint is disabled otherwise,
+requires local/same-origin access, and disables response caching. Debugging
+cannot be enabled on a public binding, with a trusted proxy, or in production.
+
+Only a browser opened with `?debug=1` initializes the debug viewer. It polls
+the bounded capture every two seconds while visible and expanded, supports
+client-side call filtering and paused updates, and uses a read-only textarea
+for pretty-printed JSON. It never requests more data from transit providers.
+Failed reads remain explicit; retry hints survive pauses and visibility changes.
+
 ## Traffic information
 
 The browser independently polls `/api/v1/traffic-info` every 60 seconds while

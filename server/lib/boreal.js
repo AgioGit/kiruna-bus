@@ -46,7 +46,7 @@ export function retryAfterSeconds(value, now = Date.now()) {
   return Number.isFinite(seconds) ? Math.max(0, seconds) : undefined;
 }
 
-export function createBoreal({ settings = config, fetchImpl = fetch, telemetry = createTelemetry(), now = Date.now } = {}) {
+export function createBoreal({ settings = config, fetchImpl = fetch, telemetry = createTelemetry(), now = Date.now, upstreamDebug } = {}) {
   const scheduler = createScheduler({
     concurrency: settings.upstreamConcurrency, maxQueue: settings.upstreamQueueSize, queueMs: settings.upstreamQueueMs,
   });
@@ -72,36 +72,49 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
             'anyride-profile-data': settings.profileData, 'anyride-profile-display': settings.profileDisplay,
           } : {};
           if (body !== undefined) headers['content-type'] = 'application/json';
-          const response = await fetchImpl(settings.borealBase + path + search, {
-            method, headers, body,
-            signal: AbortSignal.any([signal, AbortSignal.timeout(settings.upstreamTimeoutMs)]),
-          });
-          if (response.status === 429 || response.status >= 500) {
-            await response.body?.cancel();
-            throw new UpstreamError('The transit provider is temporarily unavailable.', {
-              code: 'UPSTREAM_UNAVAILABLE', status: response.status === 429 ? 503 : 502,
-              retryAfter: retryAfterSeconds(response.headers.get('retry-after')),
+          const url = settings.borealBase + path + search;
+          const trace = upstreamDebug?.start({ provider: 'boreal', url, method, headers, body });
+          try {
+            const response = await fetchImpl(url, {
+              method, headers, body,
+              signal: AbortSignal.any([signal, AbortSignal.timeout(settings.upstreamTimeoutMs)]),
             });
-          }
-          const chunks = [];
-          let size = 0;
-          for await (const chunk of response.body ?? []) {
-            size += chunk.length;
-            if (size > settings.upstreamMaxBytes) {
-              throw new UpstreamError('The transit provider response was too large.', { code: 'UPSTREAM_SIZE' });
+            trace?.response(response);
+            if (response.status === 429 || response.status >= 500) {
+              if (trace) await trace.errorBody(response);
+              else await response.body?.cancel();
+              throw new UpstreamError('The transit provider is temporarily unavailable.', {
+                code: 'UPSTREAM_UNAVAILABLE', status: response.status === 429 ? 503 : 502,
+                retryAfter: retryAfterSeconds(response.headers.get('retry-after')),
+              });
             }
-            chunks.push(Buffer.from(chunk));
+            const chunks = [];
+            let size = 0;
+            for await (const chunk of response.body ?? []) {
+              trace?.chunk(chunk);
+              size += chunk.length;
+              if (size > settings.upstreamMaxBytes) {
+                throw new UpstreamError('The transit provider response was too large.', { code: 'UPSTREAM_SIZE' });
+              }
+              chunks.push(Buffer.from(chunk));
+            }
+            trace?.complete();
+            const buffer = Buffer.concat(chunks);
+            if (response.ok) {
+              let value;
+              try { value = JSON.parse(buffer.toString('utf8')); }
+              catch (cause) { throw new UpstreamError('The transit provider returned invalid JSON.', { code: 'UPSTREAM_SCHEMA', cause }); }
+              const schema = schemaByPath[path];
+              if (schema) validate(schema, value, { upstream: true });
+              if (path === '/FindStopArea' && value !== null) validate('stop', value, { upstream: true });
+            }
+            return { status: response.status, contentType: response.headers.get('content-type'), body: buffer, fetchedAt: now() };
+          } catch (error) {
+            trace?.fail(error);
+            throw error;
+          } finally {
+            trace?.finish();
           }
-          const buffer = Buffer.concat(chunks);
-          if (response.ok) {
-            let value;
-            try { value = JSON.parse(buffer.toString('utf8')); }
-            catch (cause) { throw new UpstreamError('The transit provider returned invalid JSON.', { code: 'UPSTREAM_SCHEMA', cause }); }
-            const schema = schemaByPath[path];
-            if (schema) validate(schema, value, { upstream: true });
-            if (path === '/FindStopArea' && value !== null) validate('stop', value, { upstream: true });
-          }
-          return { status: response.status, contentType: response.headers.get('content-type'), body: buffer, fetchedAt: now() };
         }, { priority, signal });
       } catch (cause) {
         const transient = cause.code === 'UPSTREAM_UNAVAILABLE' || cause.name === 'TimeoutError'

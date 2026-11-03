@@ -124,6 +124,27 @@ root. Browser checks run from `server/` with `npx playwright install chromium`
 and `npm run test:browser`; they use a local fake upstream and local Leaflet
 assets, not Boreal or external tile services.
 
+### Local upstream debugging
+
+To inspect the backend's actual requests to Boreal and Lokaltrafiken, start
+from the repository root with:
+
+```powershell
+$env:HOST = '127.0.0.1'
+$env:LOCAL_DEBUG = 'true'
+node .\server\index.js
+```
+
+Open <http://127.0.0.1:8080/?debug=1>. The collapsible debug panel shows
+request/response pairs as formatted JSON in a read-only text area. Filter by
+call or pause updates to inspect/copy a pair. It records real outbound attempts,
+including failures and retries, not browser API reads or cache hits; opening
+the viewer does not create additional provider requests.
+
+Debugging is off by default, memory-only, and limited to a local non-production
+server. Captures are bounded and oversized bodies are marked truncated.
+See [server debugging details](server/README.md#local-upstream-debugging).
+
 ## How live tracking works
 
 The server (`server/lib/tracker.js`) does the scanning. One shared collector

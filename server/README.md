@@ -14,6 +14,47 @@ Open <http://localhost:8080/>. The same process serves `src/` and `/api`.
 Internet access is needed for live Boreal data and the production map assets,
 but the basic catalog is included in the image.
 
+## Local upstream debugging
+
+From `server/`, opt in before starting the process:
+
+```powershell
+$env:HOST = '127.0.0.1'
+$env:LOCAL_DEBUG = 'true'
+node index.js
+```
+
+Open <http://127.0.0.1:8080/?debug=1> on the same origin. A collapsible local
+debug panel displays completed Boreal and Lokaltrafiken request/response pairs
+as JSON, with a client-side call filter and Pause updates control. The viewer
+reads the capture every two seconds while open, unpaused and visible. It does
+not start collection or send extra provider requests. The backend continues
+capturing within its bounds while viewer updates are paused.
+
+`GET /api/v1/debug/upstream` returns `{entries, dropped}`. Each pair includes
+provider/call, request time, duration, request method/URL/application-supplied
+headers/body, response
+status/headers/body, truncation flags, and a failure code when applicable.
+Retries are separate attempts. Successful cache reads and coalesced waiters do
+not create duplicate pairs. Invalid JSON and partial/error responses remain
+inspectable as text rather than being mistaken for valid provider JSON.
+
+Capture is disabled by default and absent from ordinary browser sessions.
+Enabling it requires a loopback `HOST`, `TRUST_PROXY=false`, and a non-production
+environment. The debug endpoint returns 404 when disabled and rejects foreign
+hosts, sockets, and cross-origin reads even if ordinary API CORS allows them.
+It uses `Cache-Control: no-store`; there is no disk or browser-storage history.
+Shutdown clears the capture.
+
+Each process retains at most 100 completed pairs and 2 MiB of serialized entries,
+with each request/response body capped at 64 KiB. Evictions and truncation are
+explicit. Recognized credential headers, query parameters, and fields in
+complete JSON bodies are redacted. Truncated or non-JSON text and transit
+queries can still contain raw content, so do not expose or share the capture.
+`LOCAL_DEBUG=true` intentionally fails
+startup on a public binding, with trusted proxy support, or with
+`NODE_ENV=production`.
+
 ## Startup and freshness
 
 `GET /api/v1/traffic-info` is independent of AnyRide and fetched on demand
@@ -228,6 +269,7 @@ Invalid configuration fails startup instead of silently using defaults.
 |---|---|---|
 | `PORT` | `8080` | Listen port; `0` permits an ephemeral local test port. |
 | `HOST` | `0.0.0.0` | Listen address. |
+| `LOCAL_DEBUG` | `false` | Capture upstream request/response pairs in memory. Requires loopback `HOST`, no trusted proxy, and a non-production environment. View with `?debug=1`. |
 | `STATIC_DIR` | `../src` relative to the server | Static directory; `off` disables static hosting. An explicit relative path is resolved from the working directory. |
 | `SNAPSHOT_PATH` | `server/data/bootstrap.json` | Validated bundled catalog. Explicit paths resolve from the working directory. Missing or invalid data fails startup. |
 | `BOREAL_BASE` | Boreal AnyRide URL | HTTP(S) upstream base, without credentials, query, or fragment. |

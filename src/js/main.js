@@ -8,9 +8,11 @@ import { initCountdown } from './countdown.js';
 import { initTheme } from './theme.js';
 import { initMapControls } from './mapControls.js';
 import { initTrafficInfo } from './traffic-info.js';
+import { initUpstreamDebug } from './upstream-debug.js';
 
 initTheme();
 initTrafficInfo();
+initUpstreamDebug();
 
 async function main() {
   try {

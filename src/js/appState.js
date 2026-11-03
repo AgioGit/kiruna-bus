@@ -18,6 +18,7 @@ export const store = createStore({
   isCallsLoading: false,
   isStopCancelled: false,
   messages: [], // TrafficMessage[] for the selected stop
+  trafficInfo: null, // Independent public traffic feed, never filtered by map lines.
 
   liveVehicles: [], // [{ key, position, lineId, line, destination, journeyId,
   // routeId, callIds, ageMs, stale, nextStop: { stopText, plannedTime,

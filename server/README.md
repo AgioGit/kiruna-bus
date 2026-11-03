@@ -16,6 +16,25 @@ but the basic catalog is included in the image.
 
 ## Startup and freshness
 
+`GET /api/v1/traffic-info` is independent of AnyRide and fetched on demand
+from Lokaltrafiken Kiruna's public traffic feed. Each process coalesces requests
+and caches successful results for at least 60 seconds; failed attempts back off
+and return `Retry-After`, including on a 200 state response. The feed has its
+own 10-second deadline and 256 KiB response limit; it does not send AnyRide
+profile headers. No background collector runs without requests.
+
+The normalized DTO contains `state` (`fresh`, `retained`, `unavailable`),
+`trips`, `messages`, `source`, `updated`, `ageSec`, `error`, and `serverTime`.
+`ageSec` includes upstream age and elapsed backend time; the browser adds
+elapsed time and stops displaying data after 600 seconds. `updated` is only a
+provider display string, never a freshness timestamp. Empty fresh results are
+an all-clear; an empty result after a refresh failure is unavailable. Populated
+last-good results remain visible with a warning only while fresh. Unknown
+source items or missing/invalid age invalidate the entire refresh. The
+observed live feed has been empty, so nonempty normalization is based on the
+provider page's renderer, not verified producer examples. The feed does not
+alter buses, service, routes, or selected-stop messages.
+
 The container must start before the page can load; scale-to-zero still has a
 hosting cold start. Once running, bootstrap and known routes are served without
 waiting for Boreal. A newer compatible IndexedDB catalog can be used by returning
@@ -212,6 +231,7 @@ Invalid configuration fails startup instead of silently using defaults.
 | `STATIC_DIR` | `../src` relative to the server | Static directory; `off` disables static hosting. An explicit relative path is resolved from the working directory. |
 | `SNAPSHOT_PATH` | `server/data/bootstrap.json` | Validated bundled catalog. Explicit paths resolve from the working directory. Missing or invalid data fails startup. |
 | `BOREAL_BASE` | Boreal AnyRide URL | HTTP(S) upstream base, without credentials, query, or fragment. |
+| `TRAFFIC_INFO_ORIGIN` | `https://lokaltrafikenkiruna.se` | Fixed traffic feed origin; override only with a local HTTP loopback origin for fixtures. The path is not configurable. |
 | `BOREAL_PROFILE_DATA` | `boreal_kiruna` | Server-owned data profile. |
 | `BOREAL_PROFILE_DISPLAY` | `boreal` | Server-owned display profile. |
 | `UPSTREAM_TIMEOUT_MS` | `10000` | Per-attempt timeout, including body. Whole upstream operations are also bounded. |

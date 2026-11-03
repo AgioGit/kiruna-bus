@@ -5,6 +5,7 @@ import { createCatalog, loadCatalog } from '../lib/catalog.js';
 import { createTelemetry } from '../lib/telemetry.js';
 import { AppError } from '../lib/errors.js';
 import { loadConfig } from '../lib/config.js';
+import { createTrafficInfo } from '../lib/trafficInfo.js';
 
 const snapshot = loadCatalog(new URL('../data/bootstrap.json', import.meta.url));
 // Kept so /__test/reset can undo a /__test/catalog-bump - snapshot is a
@@ -55,7 +56,10 @@ const settings = loadConfig({ REFRESH_TIMEOUT_MS: '2000' });
 function build() {
   const catalog = createCatalog({ snapshot, api, telemetry, refreshTimeoutMs: settings.refreshTimeoutMs });
   const tracker = createTracker({ api, initialStops: snapshot.stops, telemetry, options: { refreshTimeoutMs: settings.refreshTimeoutMs } });
-  return createApplication({ settings, api, tracker, catalog, telemetry });
+  const trafficInfo = createTrafficInfo({ telemetry, fetcher: async () => new Response(JSON.stringify({
+    turer: [], meddelanden: [], uppdaterad: '08:16', ageSec: 20,
+  }), { headers: { 'content-type': 'application/json' } }) });
+  return createApplication({ settings, api, tracker, catalog, telemetry, trafficInfo });
 }
 let runtime = build();
 const server = http.createServer(async (req, res) => {

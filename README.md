@@ -9,6 +9,12 @@ at the server boundary. There is no application build step or database.
 
 ## Features
 
+- Independent traffic information from Lokaltrafiken Kiruna appears above
+  departures; on mobile it appears below the map only when notices exist.
+  Desktop also shows empty and unavailable status. All notices are shown
+  regardless of line filters; provider text remains Swedish. An unavailable or
+  expired feed is not an all-clear, and retained notices are marked on refresh
+  failure. The source link is in the information panel.
 - Relevant discovered bus-route variants, colored by their Swedish line names.
   The map shows observed trips in progress or within 30 minutes of their first
   observed departure (or arrival when departure is missing), without requiring

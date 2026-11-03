@@ -398,6 +398,22 @@ body {
   gap: 0.75rem;
 }
 
+.traffic-info-panel {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+.traffic-info-panel:not(.has-traffic-notices) { display: none; }
+.traffic-info-panel h2 { margin: 0 0 0.7rem; font-size: 1.05rem; }
+.traffic-info-panel p { margin: 0.45rem 0; }
+.traffic-info-panel ul { margin: 0.5rem 0; padding-left: 1.3rem; }
+.traffic-info-panel li { margin: 0.4rem 0; }
+.traffic-info-meta { color: var(--color-muted); font-size: 0.85rem; }
+.traffic-info-warning { color: var(--color-warn); font-weight: 600; }
+
 .arrivals-panel,
 .live-buses-panel {
   min-width: 0;
@@ -1001,6 +1017,7 @@ button.vehicle-card {
 }
 
 @media (min-width: 900px) and (min-height: 600px) {
+  .traffic-info-panel:not(.has-traffic-notices) { display: block; }
   body {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);

@@ -31,7 +31,7 @@
     </div>
     <section id="app-information" class="header-information" aria-labelledby="information-heading" hidden>
       <h2 id="information-heading">About this page</h2>
-      <p>All data is based on the data available through <a href="https://lokaltrafikenkiruna.se/realtidsinformation/" target="_blank" rel="noopener noreferrer">Lokaltrafiken Kiruna's real-time information page</a>.</p>
+      <p>All data is based on the data available through the real-time information page. Source: <a href="https://lokaltrafikenkiruna.se/realtidsinformation/" target="_blank" rel="noopener noreferrer">Lokaltrafiken Kiruna</a>.</p>
       <p>This page is not affiliated with either Kiruna Kommun or Boreal. It is provided as is, primarily for educational purposes. Data may be delayed or inaccurate.</p>
       <div class="header-updates">
         <span id="refresh-countdown" class="refresh-countdown" role="timer" aria-live="off"></span>
@@ -93,6 +93,10 @@
     </section>
 
     <aside class="side-panel">
+      <section id="traffic-info" class="traffic-info-panel" aria-labelledby="traffic-info-heading">
+        <h2 id="traffic-info-heading">Traffic information</h2>
+        <div id="traffic-info-content" role="status" aria-live="polite">Loading traffic information…</div>
+      </section>
       <section id="arrivals" class="arrivals-panel" aria-label="Stop departures" hidden>
         <div class="departure-heading">
           <div>

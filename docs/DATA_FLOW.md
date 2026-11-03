@@ -15,6 +15,7 @@ Container starts
   -> wait for live-client activity before collecting upstream data
 
 Browser loads
+  -> independently start traffic information polling without waiting for bootstrap
   -> read compatible IndexedDB basic catalog, if available
   -> fetch /api/v1/bootstrap and keep the newer compatible capture
   -> populate lines, stop locations, route catalog, and corrected geometry
@@ -40,7 +41,7 @@ bundled fallback. Browser writes also compare captures inside one transaction.
 listening and bounded shutdown. Importing the application does
 not start a listener or contact Boreal.
 
-All upstream calls use `server/lib/boreal.js`: one scheduler, successful-result
+AnyRide upstream calls use `server/lib/boreal.js`: one scheduler, successful-result
 cache, canonical request keys, in-flight coalescing, byte limits, and deadlines
 through body consumption. Interactive requests have reserved capacity.
 Transient retries are bounded; schema/permanent errors are not retried as if
@@ -50,6 +51,21 @@ they were network outages. Cancelling one waiter does not cancel shared work.
 Ajv. Upstream validation accepts harmless additional fields but requires valid
 essential coordinates, identifiers, timestamps, and shapes. Application DTOs
 are normalized before they reach the browser.
+
+## Traffic information
+
+The browser independently polls `/api/v1/traffic-info` every 60 seconds while
+visible. It aborts on hide, refreshes on resume subject to failure backoff,
+and ages and expires the result even without bus publications. The server's
+separate `trafficInfo.js` client calls the fixed public traffic-feed path with
+no AnyRide headers, shares one in-flight request and successful result per
+process, bounds response size and time, and backs off failures. The source's
+`ageSec` plus backend and browser elapsed time controls the 600-second limit;
+the provider's HH:mm `updated` is display-only. Fresh empty, failed retained
+notices, and unavailable/expired information remain distinct. Desktop displays
+these statuses; the non-desktop layout displays the panel below the map only
+when notices are present. All alerts are global and do not imply identities,
+map filtering, or service changes. The source link is in the About section.
 
 ## Basic catalog and routes
 

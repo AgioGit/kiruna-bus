@@ -50,6 +50,9 @@ export async function request(path, { method = 'GET', query, body, signal, timeo
       data.serverTime = response.headers.get('x-server-time');
       Object.defineProperty(data, CLOCK_SAMPLE_MAX_AGE, { value: Math.max(0, performance.now() - startedAt) });
     }
+    if (data && !Array.isArray(data)) {
+      Object.defineProperty(data, 'retryAfterMs', { value: retryAfter(response.headers.get('retry-after')) });
+    }
     return data;
   } catch (error) {
     if (signal?.aborted) throw signal.reason ?? new DOMException('Cancelled', 'AbortError');
@@ -67,6 +70,7 @@ export async function request(path, { method = 'GET', query, body, signal, timeo
 export const api = {
   getBootstrap: (opts) => request('/bootstrap', opts),
   getBuses: (opts) => request('/buses', opts),
+  getTrafficInfo: (opts) => request('/traffic-info', opts),
   getStops: (opts) => request('/stops', opts),
   getMapRoute: (id, opts) => request(`/routes/${encodeURIComponent(id)}`, opts),
   getCalls: ({ stopId }, opts) => request(`/stops/${encodeURIComponent(stopId)}/departures`, opts),

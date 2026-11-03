@@ -12,6 +12,7 @@ import { serveStatic } from './lib/static.js';
 import { AppError } from './lib/errors.js';
 import { createTelemetry } from './lib/telemetry.js';
 import { validate } from './lib/validation.js';
+import { createTrafficInfo } from './lib/trafficInfo.js';
 
 const POST_ENDPOINTS = new Set(['/GetStopAreas', '/GetCalls', '/FindStopArea', '/FindStopsNearLocation']);
 // Departures are served from the shared collector's per-stop call cache
@@ -117,6 +118,7 @@ export function createApplication({
   tracker = createTracker({ api, initialStops: catalog.get().stops, stopSource: () => catalog.get().stops,
     telemetry, now, options: { refreshTimeoutMs: settings.refreshTimeoutMs } }),
   collector = createCollector({ tracker, catalog, telemetry, now, config: settings }),
+  trafficInfo = createTrafficInfo({ origin: settings.trafficInfoOrigin, telemetry, now }),
 } = {}) {
   const passthrough = createPassthrough({ request: api.request });
   const streamHub = createStreamHub({
@@ -208,7 +210,7 @@ export function createApplication({
       }
       route = pathname.startsWith('/api/v1/stops/') ? '/api/v1/stops/:id/departures'
         : pathname.startsWith('/api/v1/routes/') ? '/api/v1/routes/:id'
-          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/stream', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby',
+          : ['/api/v1/bootstrap', '/api/v1/buses', '/api/v1/stops', '/api/v1/stream', '/api/v1/search', '/api/v1/resolve', '/api/v1/nearby', '/api/v1/traffic-info',
             '/api/live', '/api/ready', '/api/status', '/api/health', '/api/buses', '/api/stops'].includes(pathname)
             || PASSTHROUGH_ENDPOINTS.has(pathname.slice(4)) ? pathname : 'unknown_api';
       if (req.method === 'OPTIONS') {
@@ -234,6 +236,11 @@ export function createApplication({
       }
       if (draining) throw new AppError('SHUTTING_DOWN', 'Server is shutting down', { status: 503, retryAfter: 5 });
       rateLimit(req);
+      if (pathname === '/api/v1/traffic-info') {
+        method(['GET']); checkQuery(url);
+        const { data, retryAfter } = await trafficInfo.get();
+        return json(200, data, { schema: 'trafficInfo', headers: { 'Cache-Control': 'no-store', ...(retryAfter ? { 'Retry-After': String(retryAfter) } : {}) } });
+      }
       if (pathname === '/api/v1/bootstrap') {
         method(['GET']); checkQuery(url);
         // Static content: never activates the collector and never triggers
@@ -371,6 +378,7 @@ export function createApplication({
       tracker.close();
       catalog.close();
       api.close();
+      trafficInfo.close();
     },
   };
 }

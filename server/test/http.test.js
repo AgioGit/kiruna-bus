@@ -7,6 +7,8 @@ import { loadCatalog, createCatalog } from '../lib/catalog.js';
 import { createTelemetry } from '../lib/telemetry.js';
 import { validate } from '../lib/validation.js';
 import { AppError } from '../lib/errors.js';
+import { createTrafficInfo } from '../lib/trafficInfo.js';
+import http from 'node:http';
 
 const snapshot = loadCatalog(new URL('../data/bootstrap.json', import.meta.url));
 const settings = loadConfig({});
@@ -34,12 +36,48 @@ async function serve(t, overrides = {}) {
     status: () => ({ journeys: 0 }), close() {}, ...overrides.tracker,
   };
   const app = createApplication({ settings: { ...settings, ...overrides.settings }, telemetry, catalog, tracker, api,
-    now: overrides.now });
+    now: overrides.now, ...(overrides.trafficInfo ? { trafficInfo: overrides.trafficInfo } : {}) });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   t.after(async () => { app.shutdown(); app.server.closeAllConnections(); await new Promise((resolve) => app.server.close(resolve)); });
   return { ...app, base: `http://127.0.0.1:${app.server.address().port}` };
 }
+
+test('traffic endpoint is independent of AnyRide and validates methods and queries', async (t) => {
+  const data = { state: 'fresh', trips: [], messages: [], source: 'Lokaltrafiken Kiruna',
+    updated: '08:16', ageSec: 20, error: null, serverTime: new Date().toISOString() };
+  const { base } = await serve(t, { trafficInfo: { get: async () => ({ data, retryAfter: 75 }), close() {} } });
+  const result = await fetch(`${base}/api/v1/traffic-info`);
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get('retry-after'), '75');
+  assert.equal(result.headers.get('cache-control'), 'no-store');
+  validate('trafficInfo', await result.json());
+  assert.equal((await fetch(`${base}/api/v1/traffic-info?url=http://example.com`)).status, 400);
+  assert.equal((await fetch(`${base}/api/v1/traffic-info`, { method: 'POST' })).status, 405);
+});
+
+test('real traffic adapter uses fixed loopback fixture path without AnyRide headers', async (t) => {
+  let requests = 0;
+  const upstream = http.createServer((req, res) => {
+    requests++;
+    assert.equal(req.method, 'GET');
+    assert.equal(req.url, '/wp-json/boreal/v1/trafikinfo');
+    assert.equal(req.headers['anyride-profile-data'], undefined);
+    assert.equal(req.headers['anyride-profile-display'], undefined);
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ageSec: 3, uppdaterad: '23:59', turer: [], meddelanden: [{ text: 'Svenskt', niva: 'varning' }] }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const trafficInfo = createTrafficInfo({ origin: `http://127.0.0.1:${upstream.address().port}` });
+  const { base } = await serve(t, { trafficInfo });
+  const replies = await Promise.all([fetch(`${base}/api/v1/traffic-info`), fetch(`${base}/api/v1/traffic-info`)]);
+  const bodies = await Promise.all(replies.map((reply) => reply.json()));
+  assert.equal(requests, 1);
+  assert.equal(bodies[0].state, 'fresh');
+  assert.equal(bodies[1].messages[0].level, 'warning');
+});
 
 test('cold container serves shell, complete bundled catalog and route without upstream', async (t) => {
   const { base } = await serve(t);

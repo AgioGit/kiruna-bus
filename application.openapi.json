@@ -8,6 +8,17 @@
   "jsonSchemaDialect": "http://json-schema.org/draft-07/schema#",
   "servers": [{ "url": "/" }],
   "paths": {
+    "/api/v1/traffic-info": {
+      "get": {
+        "operationId": "trafficInfo",
+        "summary": "Public traffic information, independent of live buses",
+        "description": "On-demand shared cache and single-flight fetch at most once per minute, with failure backoff. state=fresh may be empty; retained contains last-good notices after a refresh failure; unavailable is not an all-clear. ageSec includes source age and backend elapsed time; clients must continue aging it and expire it after 600 seconds. updated is a provider display string, not a timestamp. Unknown source entries invalidate the refresh. Retry-After may accompany a 200 response when a refresh has failed. No association to AnyRide identifiers or line filters is implied.",
+        "responses": {
+          "200": { "description": "Traffic information state", "headers": { "Retry-After": { "description": "Seconds until the next permitted refresh, when applicable", "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/trafficInfo" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/api/v1/bootstrap": {
       "get": {
         "operationId": "bootstrap",

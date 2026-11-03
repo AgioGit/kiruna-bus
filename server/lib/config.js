@@ -15,6 +15,13 @@ export function loadConfig(env = process.env) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error('BOREAL_BASE must be an HTTP(S) URL without credentials, query or fragment');
   }
+  const trafficOrigin = env.TRAFFIC_INFO_ORIGIN ?? 'https://lokaltrafikenkiruna.se';
+  const trafficUrl = new URL(trafficOrigin);
+  if (trafficUrl.origin !== trafficOrigin || trafficUrl.username || trafficUrl.password ||
+      !(trafficOrigin === 'https://lokaltrafikenkiruna.se' ||
+        (trafficUrl.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(trafficUrl.hostname)))) {
+    throw new Error('TRAFFIC_INFO_ORIGIN must be the official HTTPS origin or a local HTTP fixture origin');
+  }
   const allowedOrigins = (env.ALLOWED_ORIGINS ?? 'https://mhedqvist.github.io')
     .split(',').map((value) => value.trim()).filter(Boolean);
   for (const origin of allowedOrigins) {
@@ -37,6 +44,7 @@ export function loadConfig(env = process.env) {
     port: integer('PORT', 8080, 0, 65535),
     host: env.HOST ?? '0.0.0.0',
     borealBase: borealBase.replace(/\/+$/, ''),
+    trafficInfoOrigin: trafficOrigin,
     profileData: env.BOREAL_PROFILE_DATA ?? 'boreal_kiruna',
     profileDisplay: env.BOREAL_PROFILE_DISPLAY ?? 'boreal',
     upstreamTimeoutMs: integer('UPSTREAM_TIMEOUT_MS', 10000),

@@ -7,8 +7,10 @@ import { initCommuter } from './commuter.js';
 import { initCountdown } from './countdown.js';
 import { initTheme } from './theme.js';
 import { initMapControls } from './mapControls.js';
+import { initTrafficInfo } from './traffic-info.js';
 
 initTheme();
+initTrafficInfo();
 
 async function main() {
   try {

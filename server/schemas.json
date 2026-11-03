@@ -2,6 +2,55 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://boreal-bus.local/schemas",
   "definitions": {
+    "trafficUpstream": {
+      "type": "object", "required": ["turer", "meddelanden", "ageSec"],
+      "properties": {
+        "ageSec": { "type": "number", "minimum": 0 },
+        "uppdaterad": { "type": ["string", "null"] },
+        "turer": { "type": "array", "items": {
+          "type": "object", "required": ["typ"],
+          "properties": {
+            "typ": { "enum": ["installd", "ingen_realtid", "forsenad", "andrad_rutt", "aater"] },
+            "tur": { "type": ["string", "number", "null"] },
+            "linje": { "type": ["string", "number", "null"] },
+            "mot": { "type": ["string", "null"] },
+            "datum": { "type": ["string", "null"] },
+            "tid": { "type": ["string", "null"] },
+            "min": { "type": ["string", "number", "null"] },
+            "uppdaterad": { "type": ["string", "null"] }
+          }
+        } },
+        "meddelanden": { "type": "array", "items": {
+          "type": "object", "required": ["text", "niva"],
+          "properties": { "text": { "type": "string" }, "niva": { "enum": ["info", "varning"] } }
+        } }
+      }
+    },
+    "trafficInfo": {
+      "type": "object", "required": ["state", "trips", "messages", "source", "updated", "ageSec", "error", "serverTime"],
+      "properties": {
+        "state": { "enum": ["fresh", "retained", "unavailable"] },
+        "source": { "const": "Lokaltrafiken Kiruna" },
+        "updated": { "type": ["string", "null"] },
+        "ageSec": { "type": ["number", "null"], "minimum": 0 },
+        "serverTime": { "type": "string", "format": "date-time" },
+        "error": { "anyOf": [{ "type": "null" }, { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } }] },
+        "trips": { "type": "array", "items": {
+          "type": "object", "required": ["type", "trip", "line", "destination", "date", "time", "delayMinutes", "updated"],
+          "properties": {
+            "type": { "enum": ["cancelled", "no_realtime", "delayed", "route_changed", "back_in_service"] },
+            "trip": { "type": ["string", "null"] }, "line": { "type": ["string", "null"] },
+            "destination": { "type": ["string", "null"] }, "date": { "type": ["string", "null"] },
+            "time": { "type": ["string", "null"] }, "updated": { "type": ["string", "null"] },
+            "delayMinutes": { "type": ["integer", "null"] }
+          }
+        } },
+        "messages": { "type": "array", "items": {
+          "type": "object", "required": ["text", "level"],
+          "properties": { "text": { "type": "string" }, "level": { "enum": ["info", "warning"] } }
+        } }
+      }
+    },
     "coordinate": {
       "type": "object", "required": ["lat", "lon"],
       "properties": { "lat": { "type": "number", "minimum": -90, "maximum": 90 }, "lon": { "type": "number", "minimum": -180, "maximum": 180 } }

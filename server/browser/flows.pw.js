@@ -21,6 +21,170 @@ test.beforeEach(async ({ page, request }) => {
 });
 test.afterEach(async ({ page }) => { expect(errors.get(page)).toEqual([]); });
 
+test('traffic is independent of bootstrap, safe, unfiltered and visible on mobile in both themes', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/v1/bootstrap', (route) => route.abort());
+  await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
+    state: 'fresh', source: 'Lokaltrafiken Kiruna', updated: '23:59', ageSec: 4, error: null,
+    serverTime: '2026-10-25T00:00:00Z',
+    trips: ['cancelled', 'no_realtime', 'delayed', 'route_changed', 'back_in_service'].map((type) => ({
+      type, trip: null, line: 'Röd', destination: 'Centrum', date: '2026-10-25', time: '00:01',
+      delayMinutes: 5, updated: null,
+    })),
+    messages: [{ level: 'info', text: '<img src=x onerror=alert(1)>' }, { level: 'warning', text: 'Svensk varning' }],
+  } }));
+  await page.goto('/');
+  const content = page.locator('#traffic-info-content');
+  await expect(content).toContainText('Cancelled');
+  await expect(content).toContainText('No real-time information');
+  await expect(content).toContainText('Route changed');
+  await expect(content).toContainText('Delayed (back in service)');
+  await expect(content).toContainText('5 min delay at departure');
+  await expect(content).toContainText('25 Oct 2026');
+  await expect(content).toContainText('<img src=x onerror=alert(1)>');
+  await expect(content.locator('img')).toHaveCount(0);
+  await expect(content).toContainText('7 traffic notices');
+  await expect(content).toContainText('Provider update: 23:59');
+  await expect(content).not.toContainText('Source:');
+  await expect(page.locator('#traffic-mobile-status')).toHaveCount(0);
+  await expect(page.locator('#traffic-info')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Traffic information', exact: true })).toHaveCount(1);
+  expect(await page.evaluate(() => {
+    const map = document.querySelector('.map-panel').getBoundingClientRect();
+    const traffic = document.querySelector('#traffic-info').getBoundingClientRect();
+    return traffic.top >= map.bottom;
+  })).toBe(true);
+  expect(await page.evaluate(() => {
+    const traffic = document.querySelector('#traffic-info');
+    return Boolean(traffic.compareDocumentPosition(document.querySelector('#arrivals')) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+      Boolean(traffic.compareDocumentPosition(document.querySelector('#live-buses')) & Node.DOCUMENT_POSITION_FOLLOWING);
+  })).toBe(true);
+  const source = page.getByRole('link', { name: 'Lokaltrafiken Kiruna', includeHidden: true });
+  await expect(source).toHaveCount(1);
+  await expect(source).toBeHidden();
+  await page.locator('#information-toggle').click();
+  await expect(source).toBeVisible();
+  await expect(source).toHaveAttribute('href', 'https://lokaltrafikenkiruna.se/realtidsinformation/');
+  await expect(source).toHaveAttribute('target', '_blank');
+  await expect(source).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(page.locator('#app-information')).toContainText('Source: Lokaltrafiken Kiruna');
+  await page.locator('#information-toggle').click();
+  await page.locator('#theme-toggle').click();
+  await expect(content).toContainText('Svensk varning');
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(page.locator('#traffic-info')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('#traffic-info')).toBeVisible();
+});
+
+test('empty and unavailable traffic statuses are hidden on mobile and shown on desktop', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let state = 'fresh';
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  await page.route('**/api/v1/traffic-info', async (route) => {
+    if (state === 'fresh') await pending;
+    await route.fulfill({ json: {
+      state, source: 'Lokaltrafiken Kiruna', updated: null, ageSec: state === 'fresh' ? 0 : null,
+      trips: [], messages: [], error: state === 'fresh' ? null : { code: 'TRAFFIC_UNAVAILABLE', message: 'Unavailable' },
+    } });
+  });
+  await page.goto('/');
+  const panel = page.locator('#traffic-info');
+  const content = page.locator('#traffic-info-content');
+  await expect(panel).toBeHidden();
+  await expect(page.locator('#traffic-mobile-status')).toHaveCount(0);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(panel).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(panel).toBeHidden();
+  release();
+  await expect(content).toContainText('No known disruptions');
+  await expect(panel).toBeHidden();
+  await expect(content.locator('.traffic-info-meta')).toHaveCount(0);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('No known disruptions');
+  await page.setViewportSize({ width: 1200, height: 599 });
+  await expect(panel).toBeHidden();
+  await page.setViewportSize({ width: 899, height: 800 });
+  await expect(panel).toBeHidden();
+  state = 'unavailable';
+  await page.reload();
+  await expect(content).toContainText('Information is unavailable or too old');
+  await expect(panel).toBeHidden();
+  await expect(content.locator('.traffic-info-meta')).toHaveCount(0);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Traffic information unavailable');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(panel).toBeHidden();
+});
+
+test('mobile traffic panel follows changing trip-only notices on refresh', async ({ page }) => {
+  await page.clock.install();
+  await page.setViewportSize({ width: 390, height: 844 });
+  let populated = false;
+  await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
+    state: 'fresh', source: 'Lokaltrafiken Kiruna', updated: null, ageSec: 0, error: null,
+    trips: populated ? [{ type: 'cancelled', trip: null, line: 'Röd', destination: 'Centrum',
+      date: '2026-10-25', time: '10:00', delayMinutes: 0, updated: null }] : [],
+    messages: [],
+  } }));
+  await page.goto('/');
+  const panel = page.locator('#traffic-info');
+  await expect(page.locator('#traffic-info-content')).toContainText('No known disruptions');
+  await expect(panel).toBeHidden();
+  populated = true;
+  await page.clock.runFor(60000);
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Cancelled');
+  populated = false;
+  await page.clock.runFor(60000);
+  await expect(page.locator('#traffic-info-content')).toContainText('No known disruptions');
+  await expect(panel).toBeHidden();
+});
+
+test('retained mobile notices remain visible with a warning until expiry', async ({ page }) => {
+  await page.clock.install();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
+    state: 'retained', source: 'Lokaltrafiken Kiruna', updated: null, ageSec: 599,
+    trips: [], messages: [{ level: 'warning', text: 'Svensk varning' }],
+    error: { code: 'TRAFFIC_UNAVAILABLE', message: 'Unavailable' },
+  } }));
+  await page.goto('/');
+  const panel = page.locator('#traffic-info');
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Svensk varning');
+  await expect(panel).toContainText('Refresh failed');
+  await expect(panel.locator('.traffic-info-meta')).toHaveCount(0);
+  expect(await page.evaluate(() => document.querySelector('#traffic-info').getBoundingClientRect().top >=
+    document.querySelector('.map-panel').getBoundingClientRect().bottom)).toBe(true);
+  await page.clock.runFor(1100);
+  await expect(panel).toBeHidden();
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Traffic information unavailable');
+  await expect(panel).not.toContainText('Svensk varning');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(panel).toBeHidden();
+});
+
+test('changing map line filters never hides global traffic notices', async ({ page }) => {
+  await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
+    state: 'fresh', source: 'Lokaltrafiken Kiruna', updated: '09:00', ageSec: 3, error: null,
+    trips: [], messages: [{ level: 'warning', text: 'Global traffic notice' }],
+  } }));
+  await page.goto('/');
+  await expect(page.locator('#traffic-info')).toContainText('Global traffic notice');
+  await page.locator('#map-lines-toggle').click();
+  const firstLine = page.locator('#line-filters input').first();
+  await expect(firstLine).toBeChecked();
+  await firstLine.uncheck();
+  await expect(page.locator('#traffic-info')).toContainText('Global traffic notice');
+});
+
 test('first visit renders cached lines, stops and route shapes while Boreal is unavailable', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#status-banner')).toContainText('Cached basic map information');
@@ -334,7 +498,7 @@ for (const width of [1280, 375, 320]) {
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     await expect(panel).toBeVisible();
     await expect(panel).toContainText('All data is based on the data available through');
-    const source = panel.getByRole('link', { name: "Lokaltrafiken Kiruna's real-time information page" });
+    const source = panel.getByRole('link', { name: 'Lokaltrafiken Kiruna' });
     await expect(source).toHaveAttribute('href', 'https://lokaltrafikenkiruna.se/realtidsinformation/');
     await expect(panel).toContainText('not affiliated with either Kiruna Kommun or Boreal');
     await expect(panel).toContainText('provided as is, primarily for educational purposes');

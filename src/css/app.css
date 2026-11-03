@@ -1017,7 +1017,6 @@ button.vehicle-card {
 }
 
 @media (min-width: 900px) and (min-height: 600px) {
-  .traffic-info-panel:not(.has-traffic-notices) { display: block; }
   body {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);

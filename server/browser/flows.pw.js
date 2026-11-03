@@ -77,7 +77,7 @@ test('traffic is independent of bootstrap, safe, unfiltered and visible on mobil
   await expect(page.locator('#traffic-info')).toBeVisible();
 });
 
-test('empty and unavailable traffic statuses are hidden on mobile and shown on desktop', async ({ page }) => {
+test('empty and unavailable traffic statuses stay hidden across viewport sizes', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   let state = 'fresh';
   let release;
@@ -95,35 +95,38 @@ test('empty and unavailable traffic statuses are hidden on mobile and shown on d
   await expect(panel).toBeHidden();
   await expect(page.locator('#traffic-mobile-status')).toHaveCount(0);
   await page.setViewportSize({ width: 1200, height: 800 });
-  await expect(panel).toBeVisible();
+  await expect(panel).toBeHidden();
+  await expect(content).toBeEmpty();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(panel).toBeHidden();
   release();
-  await expect(content).toContainText('No known disruptions');
+  await expect.poll(() => page.evaluate(async () => (await import('/js/appState.js')).store.get().trafficInfo?.state)).toBe('fresh');
+  await expect(content).toBeEmpty();
   await expect(panel).toBeHidden();
   await expect(content.locator('.traffic-info-meta')).toHaveCount(0);
   await page.setViewportSize({ width: 1200, height: 800 });
-  await expect(panel).toBeVisible();
-  await expect(panel).toContainText('No known disruptions');
+  await expect(panel).toBeHidden();
   await page.setViewportSize({ width: 1200, height: 599 });
   await expect(panel).toBeHidden();
   await page.setViewportSize({ width: 899, height: 800 });
   await expect(panel).toBeHidden();
   state = 'unavailable';
   await page.reload();
-  await expect(content).toContainText('Information is unavailable or too old');
+  await expect.poll(() => page.evaluate(async () => (await import('/js/appState.js')).store.get().trafficInfo?.state)).toBe('unavailable');
+  await expect(content).toBeEmpty();
   await expect(panel).toBeHidden();
   await expect(content.locator('.traffic-info-meta')).toHaveCount(0);
   await page.setViewportSize({ width: 1200, height: 800 });
-  await expect(panel).toBeVisible();
-  await expect(panel).toContainText('Traffic information unavailable');
+  await expect(panel).toBeHidden();
+  await expect(page.getByText('Traffic information unavailable', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Information is unavailable or too old. This does not mean there are no disruptions.', { exact: true })).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(panel).toBeHidden();
 });
 
-test('mobile traffic panel follows changing trip-only notices on refresh', async ({ page }) => {
+test('traffic panel follows changing trip-only notices on refresh across layouts', async ({ page }) => {
   await page.clock.install();
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 1200, height: 800 });
   let populated = false;
   await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
     state: 'fresh', source: 'Lokaltrafiken Kiruna', updated: null, ageSec: 0, error: null,
@@ -133,19 +136,27 @@ test('mobile traffic panel follows changing trip-only notices on refresh', async
   } }));
   await page.goto('/');
   const panel = page.locator('#traffic-info');
-  await expect(page.locator('#traffic-info-content')).toContainText('No known disruptions');
+  await expect.poll(() => page.evaluate(async () => (await import('/js/appState.js')).store.get().trafficInfo?.state)).toBe('fresh');
+  await expect(page.locator('#traffic-info-content')).toBeEmpty();
   await expect(panel).toBeHidden();
   populated = true;
   await page.clock.runFor(60000);
   await expect(panel).toBeVisible();
   await expect(panel).toContainText('Cancelled');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(panel).toBeVisible();
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(panel).toBeVisible();
   populated = false;
   await page.clock.runFor(60000);
-  await expect(page.locator('#traffic-info-content')).toContainText('No known disruptions');
+  await expect.poll(() => page.evaluate(async () => (await import('/js/appState.js')).store.get().trafficInfo?.trips.length)).toBe(0);
+  await expect(page.locator('#traffic-info-content')).toBeEmpty();
+  await expect(panel).toBeHidden();
+  await page.setViewportSize({ width: 390, height: 844 });
   await expect(panel).toBeHidden();
 });
 
-test('retained mobile notices remain visible with a warning until expiry', async ({ page }) => {
+test('retained traffic notices remain visible with a warning until expiry across layouts', async ({ page }) => {
   await page.clock.install();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route('**/api/v1/traffic-info', (route) => route.fulfill({ json: {
@@ -161,11 +172,13 @@ test('retained mobile notices remain visible with a warning until expiry', async
   await expect(panel.locator('.traffic-info-meta')).toHaveCount(0);
   expect(await page.evaluate(() => document.querySelector('#traffic-info').getBoundingClientRect().top >=
     document.querySelector('.map-panel').getBoundingClientRect().bottom)).toBe(true);
-  await page.clock.runFor(1100);
-  await expect(panel).toBeHidden();
   await page.setViewportSize({ width: 1200, height: 800 });
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText('Traffic information unavailable');
+  await expect(panel).toContainText('Svensk varning');
+  await expect(panel).toContainText('Refresh failed');
+  await page.clock.runFor(1100);
+  await expect(panel).toBeHidden();
+  await expect(page.locator('#traffic-info-content')).toBeEmpty();
   await expect(panel).not.toContainText('Svensk varning');
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(panel).toBeHidden();

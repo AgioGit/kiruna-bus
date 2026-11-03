@@ -62,9 +62,10 @@ no AnyRide headers, shares one in-flight request and successful result per
 process, bounds response size and time, and backs off failures. The source's
 `ageSec` plus backend and browser elapsed time controls the 600-second limit;
 the provider's HH:mm `updated` is display-only. Fresh empty, failed retained
-notices, and unavailable/expired information remain distinct. Desktop displays
-these statuses; the non-desktop layout displays the panel below the map only
-when notices are present. All alerts are global and do not imply identities,
+notices, and unavailable/expired information remain distinct in state. The panel
+is shown only when fresh or retained notices are present, on all screen sizes;
+empty and unavailable states are hidden. On mobile it appears below the map.
+All alerts are global and do not imply identities,
 map filtering, or service changes. The source link is in the About section.
 
 ## Basic catalog and routes

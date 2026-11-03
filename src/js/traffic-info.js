@@ -44,10 +44,11 @@ export function renderTrafficInfo(data, doc = document) {
     return node;
   };
   content.replaceChildren();
-  panel.classList.toggle('has-traffic-notices', Boolean(data && (data.trips.length || data.messages.length)));
-  add(content, 'p', trafficSummary(data), data?.state === 'unavailable' || data?.state === 'retained' ? 'traffic-info-warning' : '');
-  if (data?.state === 'retained') add(content, 'p', 'Refresh failed; showing the last available notices until they expire.', 'traffic-info-warning');
-  if (data?.state === 'unavailable') add(content, 'p', 'Information is unavailable or too old. This does not mean there are no disruptions.', 'traffic-info-warning');
+  const hasNotices = Boolean(data && ['fresh', 'retained'].includes(data.state) && (data.trips.length || data.messages.length));
+  panel.classList.toggle('has-traffic-notices', hasNotices);
+  if (!hasNotices) return;
+  add(content, 'p', trafficSummary(data), data.state === 'retained' ? 'traffic-info-warning' : '');
+  if (data.state === 'retained') add(content, 'p', 'Refresh failed; showing the last available notices until they expire.', 'traffic-info-warning');
   if (data && (data.trips.length || data.messages.length)) {
     const list = add(content, 'ul', '');
     for (const trip of data.trips) {

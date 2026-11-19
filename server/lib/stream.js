@@ -5,8 +5,8 @@ import { validate } from './validation.js';
 //  - per-connection headers (no-cache/no-transform + X-Accel-Buffering)
 //  - global + per-client (trusted-IP) connection caps
 //  - a single shared "current frame" computed from the tracker/catalog,
-//    pushed to every connected client whenever the collector reports a
-//    completed cycle (collector.onUpdate), plus once immediately on connect
+//    pushed on collector updates (including the calls commit before GPS),
+//    plus once immediately on connect
 //  - backpressure: at most one latest-pending frame per client, with a byte
 //    cap on that frame and a slow-reader deadline measured from the moment
 //    a write first blocks

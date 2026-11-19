@@ -45,6 +45,10 @@ const positiveId = (id) => Number.isSafeInteger(id) && id > 0;
 const serviceTime = (value) => timestamp(value) && /T.*(?:Z|[+-]\d\d:\d\d)$/i.test(value);
 const service = (value) => object(value) && Object.hasOwn(value, 'completeUntil')
   && (value.completeUntil === null || serviceTime(value.completeUntil))
+  && (value.classifiedUntil === undefined && value.uncertainLineIds === undefined ||
+    value.completeUntil === null && serviceTime(value.classifiedUntil)
+    && Array.isArray(value.uncertainLineIds) && value.uncertainLineIds.length > 0
+    && value.uncertainLineIds.every(positiveId))
   && Array.isArray(value.windows) && value.windows.every((window) =>
     object(window) && positiveId(window.lineId) && positiveId(window.routeId)
     && serviceTime(window.from) && serviceTime(window.until) && serviceTime(window.expiresAt)

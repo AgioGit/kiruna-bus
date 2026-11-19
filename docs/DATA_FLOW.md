@@ -4,7 +4,8 @@ The application is served by one scale-to-zero-capable Node container. The brows
 the versioned application API, not Boreal's protocol. See
 [the application contract](../application.openapi.json) and
 [server operations](../server/README.md). `openapi.yaml` and `API.md` describe
-the separate upstream API; `initial_plan.md` is historical.
+the separate upstream API; `initial_plan.md` is historical. The current Azure
+deployment is configured for one replica, including when idle.
 
 ## Startup
 
@@ -92,12 +93,16 @@ map filtering, or service changes. The source link is in the About section.
 
 `catalog.js` serves the bundled catalog immediately. The activity-gated
 collector checks static source information every 15 minutes. Bootstrap reads
-do not start independent captures. Failures preserve the previous catalog and
-back off. Jobs have a whole-operation deadline and are disposable if the host
-terminates the container. Runtime route discovery reuses the dynamic calls
-cache rather than performing a second town-wide call scan.
+do not start independent captures. Failed captures back off. A degraded
+capture can retain previous entries and publish validated additions.
+Jobs have a whole-operation deadline and are canceled at shutdown.
+Runtime route discovery reuses the dynamic calls cache rather than performing a
+second town-wide call scan.
 An initial capture waits for the in-flight dynamic cycle; only newly discovered
 stops need extra bounded calls to discover routes not yet known to the tracker.
+The tracker scans only the accepted catalog's stops. An absent stop, an
+unresolved location, or a failed geometry fetch does not delete last-good data.
+A line with no usable geometry can be accepted with an empty route list.
 
 The explicit `npm run snapshot` command uses the same validated capture logic.
 It requires complete capture/coverage and writes atomically only on success.
@@ -108,12 +113,14 @@ unchanged source check does not force a map rebuild.
 
 Route associations are discovered from calls and retained in the accepted basic
 catalog for use outside service hours. The server applies the guarded LKAB
-geometry correction. Unknown routes can be fetched lazily with a bounded
-in-memory cache. The browser does not perform provider-specific discovery or
+geometry correction. A route cache miss requires recent live evidence; catalog
+and cached routes remain readable without it. The browser does not perform provider-specific discovery or
 corrections; it still computes visual route overlap, lane offsets, heading
-fallback, and dotted previews through up to three upcoming stops for selected
-or hovered buses. Previews use the displayed route lane and fall back to fewer
-stops when fewer are available.
+fallback, and dotted previews. Selection draws to the last reported upcoming
+stop with a known location, while hover previews up to three upcoming stops.
+Stops with no forecast use their planned time.
+The previews follow the displayed route lane; neither Tåg nor Flyg uses this
+preview because their shapes are approximate.
 
 Bootstrap, stops, and route resources support ETag revalidation. Current
 `X-Server-Time` is separate from the catalog capture and original GPS times.
@@ -127,10 +134,12 @@ Probes and basic-catalog reads do not renew that activity window. The first live
 client starts a cycle immediately; idle periods stop future scheduling. There
 is no unconditional startup scan.
 
-Cycles do not overlap or accumulate catch-up ticks. A bounded cycle commits its
-results before publication; snapshot readers do not see half-completed
-call/position updates. All clients share the same collection, with no
-per-connection upstream loops.
+Dynamic cycles do not overlap with other dynamic cycles or accumulate catch-up
+ticks. Each cycle commits departures and service evidence before GPS. When
+there is GPS work, SSE can publish the calls first and publish positions in a
+later revision. The GPS phase has its own ten-second deadline; settled fixes
+are kept and GPS-only degradation does not trigger departure backoff. All
+clients share the same collection, with no per-connection upstream loops.
 
 Successful stop results replace that stop's previous calls, including empty
 results. Failed stops can retain their original results for six minutes,

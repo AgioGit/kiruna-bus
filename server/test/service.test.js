@@ -117,6 +117,41 @@ test('undated or unassociated calls cannot make an empty scan authoritative', as
   } finally { tracker.close(); }
 });
 
+test('classification failures affect only their line and partial scans do not renew coverage', async () => {
+  let time = start, partial = false;
+  const undated = { ...call('1', 1, 1, 99, iso(start)), departure: null };
+  const tracker = createTracker({
+    now: () => time, initialStops: [{ id: 1, text: 'A' }, { id: 2, text: 'B' }],
+    options: { retryDelayMs: 0 },
+    api: {
+      getSystemTimestamp: async (clientTimestamp) => ({ clientTimestamp, systemTimestamp: clientTimestamp }),
+      getCalls: async (text) => {
+        if (partial && text === 'B') throw new Error('offline');
+        return { calls: text === 'A' && !partial ? [{ calls: [undated] }] : [] };
+      },
+      getVehiclePosition: async () => null,
+    },
+  });
+  try {
+    await tracker.collect();
+    const coverage = { completeUntil: null, classifiedUntil: iso(start + CALL_RETENTION_MS),
+      uncertainLineIds: [1], windows: [] };
+    assert.deepEqual(tracker.getSnapshot().service, coverage);
+    partial = true;
+    time += 60_000;
+    await tracker.collect();
+    assert.deepEqual(tracker.getSnapshot().service, coverage);
+    assert.equal(tracker.hasObservedRoute(99), false, 'a successful empty stop refresh removes the obsolete call');
+    partial = false;
+    undated.departure = { plannedTime: iso(time + 60_000), forecastTime: null };
+    await tracker.collect();
+    assert.equal(tracker.getSnapshot().service.completeUntil, iso(time + CALL_RETENTION_MS));
+    assert.equal(tracker.hasObservedRoute(99), true);
+    time += CALL_RETENTION_MS;
+    assert.equal(tracker.hasObservedRoute(99), false);
+  } finally { tracker.close(); }
+});
+
 test('a newly expanded stop catalog invalidates old complete coverage on a partial scan', async () => {
   let stops = [{ id: 1, text: 'A' }];
   const api = {

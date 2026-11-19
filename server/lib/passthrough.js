@@ -1,4 +1,4 @@
-import { borealRequest, cacheKey } from './boreal.js';
+import { borealRequest, cacheKey, parseProviderJson, UpstreamError } from './boreal.js';
 import { TtlCache } from './cache.js';
 
 // Endpoints the browser may call through /api/<name>. Anything else is 404.
@@ -33,12 +33,18 @@ const TTL_MS = {
 };
 
 // Relays a browser request to Boreal with caching. Identical concurrent
-// requests share one upstream call. Returns { status, contentType, body, cache }.
+// requests share one upstream call. Only validated JSON is sent to browsers.
 export function createPassthrough({ cache = new TtlCache(), request = borealRequest } = {}) {
   const inflight = new Map();
 
   return async function passthrough(path, { method, search = '', body }) {
-    const load = () => request(path, { method, search, body, profile: path !== '/GetConfigOptions' });
+    const load = async () => {
+      const response = await request(path, { method, search, body, profile: path !== '/GetConfigOptions', priority: 'public' });
+      if (response.status < 200 || response.status >= 300) {
+        throw new UpstreamError('The transit provider rejected the request.', { code: 'UPSTREAM_REJECTED' });
+      }
+      return { status: response.status, body: Buffer.from(JSON.stringify(parseProviderJson(path, response.body))) };
+    };
 
     const ttl = TTL_MS[path];
     if (!ttl) return { ...(await load()), cache: 'BYPASS' };

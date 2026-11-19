@@ -1,23 +1,24 @@
 import { AppError } from './errors.js';
 
 export function createScheduler({ concurrency = 16, maxQueue = 256, queueMs = 15000 } = {}) {
-  const queues = { interactive: [], background: [] };
+  const queues = { interactive: [], background: [], public: [] };
   let active = 0;
-  let background = 0;
+  let nonInteractive = 0;
   let closed = false;
+  const waiting = () => Object.values(queues).reduce((count, queue) => count + queue.length, 0);
 
   function drain() {
     while (!closed && active < concurrency) {
       const job = queues.interactive.shift() ??
-        (background < concurrency - 1 ? queues.background.shift() : null);
+        (nonInteractive < concurrency - 1 ? queues.background.shift() ?? queues.public.shift() : null);
       if (!job) break;
       clearTimeout(job.timer);
       job.signal?.removeEventListener('abort', job.abort);
       active++;
-      if (job.priority === 'background') background++;
+      if (job.priority !== 'interactive') nonInteractive++;
       const finish = () => {
         active--;
-        if (job.priority === 'background') background--;
+        if (job.priority !== 'interactive') nonInteractive--;
         drain();
       };
       Promise.resolve().then(job.work).then(
@@ -39,8 +40,11 @@ export function createScheduler({ concurrency = 16, maxQueue = 256, queueMs = 15
     run(work, { priority = 'interactive', signal } = {}) {
       if (closed) return Promise.reject(new AppError('SHUTTING_DOWN', 'Server is shutting down', { status: 503 }));
       if (signal?.aborted) return Promise.reject(signal.reason);
-      if (queues.interactive.length + queues.background.length >= maxQueue
-        && !(priority === 'interactive' && active < concurrency)) {
+      if (!Object.hasOwn(queues, priority)) throw new TypeError('Unknown upstream priority');
+      const startsNow = active < concurrency && (priority === 'interactive' ||
+        (nonInteractive < concurrency - 1 && (priority === 'background' || !queues.background.length)));
+      const queueLimit = priority === 'public' ? maxQueue - 1 : maxQueue;
+      if (waiting() >= queueLimit && !startsNow) {
         return Promise.reject(new AppError('UPSTREAM_BUSY', 'Live data is busy. Try again shortly.', { status: 503, retryAfter: 5 }));
       }
       return new Promise((resolve, reject) => {
@@ -53,7 +57,7 @@ export function createScheduler({ concurrency = 16, maxQueue = 256, queueMs = 15
         drain();
       });
     },
-    status: () => ({ active, queued: queues.interactive.length + queues.background.length, concurrency }),
+    status: () => ({ active, queued: waiting(), concurrency }),
     close() {
       closed = true;
       for (const queue of Object.values(queues)) {

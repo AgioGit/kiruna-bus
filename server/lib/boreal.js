@@ -32,7 +32,17 @@ const schemaByPath = {
   '/GetConfigOptions': 'upstreamConfig',
   '/GetLines': 'lines', '/GetStopAreas': 'stops', '/GetCalls': 'calls',
   '/GetVehiclePosition': 'position', '/GetMapRoute': 'route', '/GetSystemTimestamp': 'timestamp',
+  '/GetVehiclePositions': 'positions', '/GetDirections': 'directions', '/Autocomplete': 'suggestions',
+  '/FindStopArea': 'optionalStop', '/FindStopsNearLocation': 'stops',
 };
+export function parseProviderJson(path, buffer) {
+  let value;
+  try { value = JSON.parse(buffer.toString('utf8')); }
+  catch (cause) { throw new UpstreamError('The transit provider returned invalid JSON.', { code: 'UPSTREAM_SCHEMA', cause }); }
+  const schema = schemaByPath[path];
+  return schema ? validate(schema, value, { upstream: true }) : value;
+}
+
 const ttlByPath = {
   '/GetCalls': 30000, '/GetVehiclePosition': 15000, '/GetVehiclePositions': 15000,
   '/GetLines': 3600000, '/GetStopAreas': 3600000, '/GetMapRoute': 3600000,
@@ -60,9 +70,9 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
     telemetry.log('upstream_failure', { endpoint: path, code: error.code ?? error.name });
   }
 
-  async function load(path, { method = 'GET', search = '', body, profile = true, priority = 'interactive' }) {
+  async function load(path, { method = 'GET', search = '', body, profile = true, priority = 'interactive' }, flightSignal) {
     const started = performance.now();
-    const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(settings.upstreamTimeoutMs * 2 + 1000)]);
+    const signal = AbortSignal.any([shutdown.signal, flightSignal, AbortSignal.timeout(settings.upstreamTimeoutMs * 2 + 1000)]);
     for (let attempt = 0; ; attempt++) {
       const attemptStarted = performance.now();
       try {
@@ -76,10 +86,14 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
           const trace = upstreamDebug?.start({ provider: 'boreal', url, method, headers, body });
           try {
             const response = await fetchImpl(url, {
-              method, headers, body,
+              method, headers, body, redirect: 'manual',
               signal: AbortSignal.any([signal, AbortSignal.timeout(settings.upstreamTimeoutMs)]),
             });
             trace?.response(response);
+            if (response.status >= 300 && response.status < 400) {
+              await response.body?.cancel();
+              throw new UpstreamError('The transit provider returned an unexpected redirect.', { code: 'UPSTREAM_REDIRECT' });
+            }
             if (response.status === 429 || response.status >= 500) {
               if (trace) await trace.errorBody(response);
               else await response.body?.cancel();
@@ -87,6 +101,11 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
                 code: 'UPSTREAM_UNAVAILABLE', status: response.status === 429 ? 503 : 502,
                 retryAfter: retryAfterSeconds(response.headers.get('retry-after')),
               });
+            }
+            if (!response.ok) {
+              if (trace) await trace.errorBody(response);
+              else await response.body?.cancel();
+              throw new UpstreamError('The transit provider rejected the request.', { code: 'UPSTREAM_REJECTED' });
             }
             const chunks = [];
             let size = 0;
@@ -100,15 +119,8 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
             }
             trace?.complete();
             const buffer = Buffer.concat(chunks);
-            if (response.ok) {
-              let value;
-              try { value = JSON.parse(buffer.toString('utf8')); }
-              catch (cause) { throw new UpstreamError('The transit provider returned invalid JSON.', { code: 'UPSTREAM_SCHEMA', cause }); }
-              const schema = schemaByPath[path];
-              if (schema) validate(schema, value, { upstream: true });
-              if (path === '/FindStopArea' && value !== null) validate('stop', value, { upstream: true });
-            }
-            return { status: response.status, contentType: response.headers.get('content-type'), body: buffer, fetchedAt: now() };
+            parseProviderJson(path, buffer);
+            return { status: response.status, body: buffer, fetchedAt: now() };
           } catch (error) {
             trace?.fail(error);
             throw error;
@@ -147,6 +159,7 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
   }
 
   async function request(path, options = {}) {
+    options.signal?.throwIfAborted();
     const key = cacheKey(path, options);
     const ttl = ttlByPath[path];
     // `fresh` bypasses the cache *read* so scheduled collector cycles always perform a genuine
@@ -160,18 +173,32 @@ export function createBoreal({ settings = config, fetchImpl = fetch, telemetry =
       return { ...hit, cache: 'HIT' };
     }
     telemetry.count('cacheMisses');
-    let pending = inflight.get(key);
-    telemetry.log('upstream_cache', { endpoint: path, outcome: pending ? 'COALESCED' : useCache ? 'MISS' : 'BYPASS' });
-    if (!pending) {
-      pending = load(path, options).then((res) => {
-        if (res.status === 200 && ttl) cache.set(key, res, ttl);
+    // Lower-priority reads may share higher-priority work, never the reverse.
+    const priority = options.priority ?? 'interactive';
+    const flightKey = `${priority} ${key}`;
+    let flight = inflight.get(`interactive ${key}`) ?? (priority === 'public' ? inflight.get(`background ${key}`) : null)
+      ?? inflight.get(flightKey);
+    telemetry.log('upstream_cache', { endpoint: path, outcome: flight ? 'COALESCED' : useCache ? 'MISS' : 'BYPASS' });
+    if (!flight) {
+      const controller = new AbortController();
+      const pending = load(path, options, controller.signal).then((res) => {
+        if (!controller.signal.aborted && res.status === 200 && ttl) cache.set(key, res, ttl);
         return res;
       });
-      inflight.set(key, pending);
-      const clear = () => inflight.delete(key);
+      flight = { controller, pending, waiters: 0, key: flightKey };
+      inflight.set(flightKey, flight);
+      const clear = () => { if (inflight.get(flightKey) === flight) inflight.delete(flightKey); };
       pending.then(clear, clear);
     }
-    return { ...(await withSignal(pending, options.signal)), cache: useCache ? 'MISS' : 'BYPASS' };
+    flight.waiters++;
+    try {
+      return { ...(await withSignal(flight.pending, options.signal)), cache: useCache ? 'MISS' : 'BYPASS' };
+    } finally {
+      if (--flight.waiters === 0 && inflight.get(flight.key) === flight) {
+        inflight.delete(flight.key);
+        flight.controller.abort(options.signal?.reason);
+      }
+    }
   }
 
   async function json(path, options = {}) {

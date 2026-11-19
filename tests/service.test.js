@@ -35,6 +35,19 @@ test('threshold, ongoing trip, expiry and incomplete coverage preserve manual ch
   assert.deepEqual([...state.activeLineIds], [1, 2]);
 });
 
+test('coverage hides unobserved variants only for classifiable lines until its original expiry', () => {
+  const expires = t0 + 1000;
+  const data = { completeUntil: null, classifiedUntil: iso(expires), uncertainLineIds: [1],
+    windows: [window(1, 101, t0, expires, expires)] };
+  const scoped = serviceView(data, t0);
+  assert.equal(scoped.complete, false);
+  assert.equal(scoped.next, expires);
+  assert.equal(routeServiceStatus(scoped, 1, 101), 'active');
+  assert.equal(routeServiceStatus(scoped, 1, 102), 'unknown');
+  assert.equal(routeServiceStatus(scoped, 2, 201), 'inactive');
+  assert.equal(routeServiceStatus(serviceView(data, expires), 2, 201), 'unknown');
+});
+
 test('timers, duplicate deliveries, stale ordering and older payloads do not renew evidence', (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: t0 });
   t.mock.method(performance, 'now', () => Date.now());

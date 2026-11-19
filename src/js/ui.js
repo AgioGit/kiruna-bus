@@ -181,7 +181,7 @@ function renderVehicleCards(state) {
       : '<span class="status-live">Live position</span>';
     const nextStopText = stripStopId(bus.nextStop?.stopText) ?? '—';
     const planned = formatTime(bus.nextStop?.plannedTime);
-    const expected = formatTime(bus.nextStop?.forecastTime);
+    const expected = formatTime(bus.nextStop?.forecastTime ?? bus.nextStop?.plannedTime);
     const selected = bus.journeyId === state.selectedVehicleJourneyId;
     const expanded = selected && !expandedJourneys.has(bus.journeyId);
     if (expanded) expandedJourneys.add(bus.journeyId);
@@ -531,9 +531,13 @@ function renderStatus(state) {
   if (!container) return;
   const messages = [];
   if (!state.serviceView?.complete) {
-    messages.push(['service', 'Route service is unknown; unverified routes are shown faded.']);
+    messages.push(['service', state.serviceView?.classified
+      ? 'Some lines have unverified service; their unverified routes are shown faded.'
+      : 'Route service is unknown; unverified routes are shown faded.']);
   }
-  if (state.catalogInfo && state.catalogInfo.source !== 'upstream') {
+  if (state.catalogInfo?.source === 'retained') {
+    messages.push(['catalog', 'Some basic map information could not be refreshed; previous data is retained.']);
+  } else if (state.catalogInfo && state.catalogInfo.source !== 'upstream') {
     messages.push(['catalog', `Cached basic map information from ${new Date(state.catalogInfo.capturedAt).toLocaleString('sv-SE')}. Live data loads separately.`]);
   }
   for (const [key, value] of Object.entries(state.errors)) {

@@ -18,9 +18,10 @@ export const STALE_THRESHOLD_MS = 3 * 60 * 1000;
 export const CALL_RETENTION_MS = 6 * 60 * 1000;
 export const SERVICE_LEAD_MS = 30 * 60 * 1000;
 
+const effectiveTime = (value) => Date.parse(value?.forecastTime ?? value?.plannedTime ?? '');
+
 function callServiceTimes(call) {
-  return [call.arrival, call.departure].map((value) => Date.parse(value?.forecastTime ?? value?.plannedTime ?? ''))
-    .filter(Number.isFinite);
+  return [call.arrival, call.departure].map(effectiveTime).filter(Number.isFinite);
 }
 
 // For each observation age, only calls at least that fresh can support the
@@ -30,7 +31,7 @@ export function buildServiceWindows(entries, clockOffsetMs = 0) {
   const groups = new Map();
   for (const entry of entries) {
     for (const call of entry.calls) {
-      if (!call.routeId || call.journeyId == null) continue;
+      if (!call.lineId || !call.routeId || call.journeyId == null) continue;
       const times = callServiceTimes(call);
       if (!times.length) continue;
       const key = `${call.lineId}:${call.routeId}:${call.journeyId}`;
@@ -135,9 +136,9 @@ const DEFAULT_OPTIONS = {
 export function buildJourneys(callsWithStop) {
   // Arrival is "when the bus reaches this stop"; mid-route calls often only
   // carry departure, which stands in when arrival is absent.
-  const forecastOf = (call) => call.arrival ?? call.departure ?? null;
+  const forecastOf = (call) => Number.isFinite(effectiveTime(call.arrival)) ? call.arrival : call.departure ?? call.arrival ?? null;
   const timeOf = (call) => {
-    const ms = Date.parse(forecastOf(call)?.forecastTime ?? '');
+    const ms = effectiveTime(forecastOf(call));
     return Number.isNaN(ms) ? null : ms;
   };
 
@@ -197,7 +198,7 @@ export function buildJourneys(callsWithStop) {
 // stop stands in.
 export function upcomingStops(info, nowMs, count = UPCOMING_STOP_COUNT) {
   const future = info.stops.filter((stop) => {
-    const ms = Date.parse(stop.forecastTime ?? '');
+    const ms = effectiveTime(stop);
     return !Number.isNaN(ms) && ms > nowMs;
   });
   const pool = future.length ? future : info.stops.slice(0, 1);
@@ -277,7 +278,7 @@ export function buildVehicles({ journeys, positions, nowMs, unavailableCallIds =
       const key = positionKey(position);
       const upcoming = upcomingStops(info, nowMs, Number.POSITIVE_INFINITY);
       const [nextStop, followingStop] = upcoming;
-      const forecastMs = Date.parse(nextStop?.forecastTime ?? '');
+      const forecastMs = effectiveTime(nextStop);
       const forecastRank = Number.isNaN(forecastMs)
         ? Number.POSITIVE_INFINITY
         : forecastMs >= nowMs
@@ -383,7 +384,8 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
   let departureHistoryByStop = new Map();
   let serviceWindows = [];
   let serviceLineNames = new Map();
-  let completeServiceUntil = null;
+  let classifiedUntil = null;
+  let uncertainLineIds = new Set();
   let completeStopIds = new Set();
   const shutdown = new AbortController();
   let operationSignal;
@@ -488,11 +490,7 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     return results;
   }
 
-  // One cycle: fetch calls for every stop, then positions for every call id
-  // implied by those calls, entirely into local "staged" values, and only
-  // then commit everything in one synchronous block. A reader can therefore
-  // never see this cycle's calls paired with the previous cycle's positions.
-  async function collectOnce({ fresh = true } = {}) {
+  async function collectOnce({ fresh, onCalls, refreshId }) {
     await ensureClock();
     const stopList = await ensureStops();
     if (stopList.length > opt.callCacheMaxEntries) {
@@ -551,15 +549,19 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     }
     const stagedJourneys = buildJourneys(callsWithStop);
     const observedWindows = buildServiceWindows([...stagedCallsByStop.values()], clockOffsetMs);
-    const callsClassifiable = callsWithStop.every(({ call }) =>
-      call.routeId && call.journeyId != null && callServiceTimes(call).length);
-    const complete = stopList.length > 0 && !newCoverage.failed && callsClassifiable;
+    const unclassified = callsWithStop.filter(({ call }) =>
+      !call.lineId || !call.routeId || call.journeyId == null || !callServiceTimes(call).length);
+    const fullScan = stopList.length > 0 && !newCoverage.failed;
     const sameCoverage = stopList.length === completeStopIds.size && stopList.every((stop) => completeStopIds.has(stop.id));
-    const newCompleteServiceUntil = complete
+    const unknownLine = unclassified.some(({ call }) => !call.lineId);
+    const newClassifiedUntil = unknownLine ? null : fullScan
       ? new Date(Math.min(...callResults.map((res) => res.value.at)) + clockOffsetMs + CALL_RETENTION_MS).toISOString()
-      : sameCoverage ? completeServiceUntil : null;
-    const candidates = complete ? observedWindows : [
-      ...serviceWindows.filter((window) => Date.parse(window.expiresAt) > serverNow()),
+      : sameCoverage ? classifiedUntil : null;
+    const newUncertainLineIds = new Set(!fullScan && sameCoverage ? uncertainLineIds : []);
+    for (const { call } of unclassified) if (call.lineId) newUncertainLineIds.add(call.lineId);
+    const candidates = [
+      ...serviceWindows.filter((window) => Date.parse(window.expiresAt) > serverNow() &&
+        (!fullScan || unknownLine || newUncertainLineIds.has(window.lineId))),
       ...observedWindows,
     ];
     const newServiceWindows = coalesceServiceWindows(candidates);
@@ -578,9 +580,39 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       : lastSuccessfulScan;
 
     const callIds = [...new Set([...stagedJourneys.values()].flatMap((info) => info.positionCallIds))];
+    operationSignal.throwIfAborted();
+    callsByStop = stagedCallsByStop;
+    departureHistoryByStop = stagedHistory;
+    serviceWindows = newServiceWindows;
+    serviceLineNames = newServiceLineNames;
+    classifiedUntil = newClassifiedUntil;
+    uncertainLineIds = newClassifiedUntil ? newUncertainLineIds : new Set();
+    if (fullScan) completeStopIds = knownStops;
+    journeys = stagedJourneys;
+    lineRoutes = stagedLineRoutes;
+    coverage = newCoverage;
+    scanError = newScanError;
+    if (scanOk) {
+      lastScanAt = now();
+      lastSuccessfulScan = newLastSuccessfulScan;
+    }
+    completed = true;
+
+    // Publish departures before waiting for GPS, without refreshing the age
+    // of any fix still on screen.
+    if (callIds.length) {
+      revision += 1;
+      try { onCalls?.(); }
+      catch (error) { telemetry?.log('calls_publication_failed', { refreshId, code: error.code ?? error.name }); }
+    }
+
+    const positionSignal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(opt.positionTimeoutMs ?? 10000)]);
+    setMaxListeners(opt.positionConcurrency * 3 + 4, positionSignal);
     const posResults = await runPooled(callIds, opt.positionConcurrency,
-      (callId) => api.getVehiclePosition(callId, apiOptions({ fresh })), { signal: operationSignal });
-    operationSignal?.throwIfAborted();
+      (callId) => api.getVehiclePosition(callId, apiOptions({ fresh, signal: positionSignal })),
+      { signal: positionSignal, keepPartial: true });
+    if (shutdown.signal.aborted) return;
+    if (positionSignal.aborted) telemetry?.log('positions_aborted', { refreshId, code: positionSignal.reason.name });
     const newPositionCoverage = {
       attempted: callIds.length,
       succeeded: posResults.filter((res) => res.status === 'fulfilled' && res.value?.location).length,
@@ -620,26 +652,13 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
       : newPositionCoverage.failed ? 'Some bus positions could not be refreshed.' : null;
 
     // --- Commit: one synchronous block, nothing awaited in between. ---
-    callsByStop = stagedCallsByStop;
-    departureHistoryByStop = stagedHistory;
-    serviceWindows = newServiceWindows;
-    serviceLineNames = newServiceLineNames;
-    completeServiceUntil = newCompleteServiceUntil;
-    if (complete) completeStopIds = new Set(stopList.map((stop) => stop.id));
-    journeys = stagedJourneys;
-    lineRoutes = stagedLineRoutes;
     positions = stagedPositions;
     unavailableCallIds = stagedUnavailable;
     lastKnownJourneys = stagedLastKnownJourneys;
-    coverage = newCoverage;
     positionCoverage = newPositionCoverage;
-    scanError = newScanError;
     positionsError = newPositionsError;
-    if (scanOk) lastScanAt = now();
     positionsAt = now();
-    if (scanOk) lastSuccessfulScan = newLastSuccessfulScan;
     if (!newPositionCoverage.failed) lastSuccessfulPositions = new Date(now()).toISOString();
-    completed = true;
     revision += 1;
   }
 
@@ -648,17 +667,20 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
   // in-flight cycle. `fresh` bypasses Boreal's opportunistic cache so a
   // scheduled cycle is a genuine upstream check even when a per-path cache
   // TTL would otherwise still be valid.
-  function collect({ fresh = true } = {}) {
+  function collect({ fresh = true, onCalls } = {}) {
+    if (shutdown.signal.aborted) return Promise.resolve();
     if (!refreshing) {
       const refreshId = randomUUID();
       operationSignal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(options.refreshTimeoutMs ?? 60000)]);
       setMaxListeners(Math.max(opt.scanConcurrency, opt.positionConcurrency) * 3 + 4, operationSignal);
       const started = performance.now();
-      refreshing = collectOnce({ fresh }).catch((error) => {
+      refreshing = collectOnce({ fresh, onCalls, refreshId }).catch((error) => {
+        if (shutdown.signal.aborted) return;
         scanError = 'Unable to refresh live bus data.';
         const attempted = stops?.length ?? 0;
         if (attempted !== completeStopIds.size || stops?.some((stop) => !completeStopIds.has(stop.id))) {
-          completeServiceUntil = null;
+          classifiedUntil = null;
+          uncertainLineIds = new Set();
         }
         coverage = { attempted, succeeded: 0, failed: attempted };
         completed = true;
@@ -756,7 +778,8 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
         quality: this.quality(),
         vehicles,
         service: {
-          completeUntil: completeServiceUntil,
+          completeUntil: uncertainLineIds.size ? null : classifiedUntil,
+          ...(uncertainLineIds.size ? { classifiedUntil, uncertainLineIds: [...uncertainLineIds].sort((a, b) => a - b) } : {}),
           windows: currentServiceWindows,
         },
         observedLines: [...observedLines.values()],
@@ -793,6 +816,20 @@ export function createTracker({ api, now = Date.now, options = {}, initialStops 
     getPreviousDeparture(stopId) { return this.getDepartureHistory(stopId).previous; },
 
     getRevision: () => revision,
+
+    hasObservedRoute(routeId) {
+      const readAt = now();
+      const nowMs = readAt + clockOffsetMs;
+      for (const entry of callsByStop.values()) {
+        if (readAt - entry.at < CALL_RETENTION_MS && entry.calls.some((call) => call.routeId === routeId)) return true;
+      }
+      if (serviceWindows.some((window) => window.routeId === routeId && Date.parse(window.expiresAt) > nowMs)) return true;
+      const hasFix = (info, fixes) => info.routeId === routeId && info.positionCallIds.some((id) =>
+        nowMs - Date.parse(fixes.get(id)?.timestamp ?? '') <= STALE_THRESHOLD_MS);
+      for (const info of journeys.values()) if (hasFix(info, positions)) return true;
+      for (const { info, positions: fixes } of lastKnownJourneys.values()) if (hasFix(info, fixes)) return true;
+      return false;
+    },
 
     // Committed call/route associations, in the same shape captureCatalog
     // expects, so the static cycle can consume them instead of re-scanning

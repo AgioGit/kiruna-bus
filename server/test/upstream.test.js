@@ -47,7 +47,7 @@ test('queue deadlines and cancellation remove pending work', async () => {
   assert.equal(scheduler.status().queued, 0);
 });
 
-test('adapter coalesces tracker and interactive calls and validates before caching', async () => {
+test('lower priority callers share an existing collector flight; invalid data never enters the cache', async () => {
   let calls = 0;
   let valid = false;
   const api = createBoreal({ settings, telemetry: quiet(), fetchImpl: async () => {
@@ -56,12 +56,44 @@ test('adapter coalesces tracker and interactive calls and validates before cachi
   } });
   await assert.rejects(api.getCalls('Town'), { code: 'UPSTREAM_SCHEMA' });
   valid = true;
-  const results = await Promise.all([api.getCalls('Town', { priority: 'background' }), api.getCalls('Town')]);
+  const results = await Promise.all([api.getCalls('Town'), api.getCalls('Town', { priority: 'public' })]);
   assert.equal(calls, 2);
   assert.deepEqual(results[0], { calls: [] });
   await api.getCalls('Town');
   assert.equal(calls, 2);
   api.close();
+});
+
+test('queued public work cannot block a collector request for the same key', async () => {
+  let release;
+  const api = createBoreal({
+    settings: { ...settings, upstreamConcurrency: 2, upstreamQueueSize: 2 }, telemetry: quiet(),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/GetLines')) await new Promise((resolve) => { release = resolve; });
+      return Response.json(url.endsWith('/GetLines') ? [{ id: 1, text: 'Town' }] : { calls: [] });
+    },
+  });
+  const hold = api.getLines({ priority: 'public' });
+  try {
+    const queued = api.getCalls('Town', { priority: 'public' });
+    await assert.rejects(api.getCalls('Other', { priority: 'public' }), { code: 'UPSTREAM_BUSY' });
+    assert.deepEqual(await api.getCalls('Town', { fresh: true }), { calls: [] });
+    release();
+    await Promise.all([hold, queued]);
+  } finally { api.close(); }
+});
+
+test('unexpected provider redirects do not get followed or retried', async () => {
+  let requests = 0;
+  const api = createBoreal({ settings, telemetry: quiet(), fetchImpl: async (_, options) => {
+    requests++;
+    assert.equal(options.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { location: 'https://example.test/other' } });
+  } });
+  try {
+    await assert.rejects(api.getLines(), { code: 'UPSTREAM_REDIRECT' });
+    assert.equal(requests, 1);
+  } finally { api.close(); }
 });
 
 test('one cancelled waiter does not cancel shared upstream work', async () => {

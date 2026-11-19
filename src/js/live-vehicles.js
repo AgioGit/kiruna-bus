@@ -31,7 +31,7 @@ function expirePositions(vehicles) {
 }
 
 export function isNextStopSoon(bus, nowMs) {
-  const forecastMs = Date.parse(bus.nextStop?.forecastTime ?? '');
+  const forecastMs = Date.parse(bus.nextStop?.forecastTime ?? bus.nextStop?.plannedTime ?? '');
   if (Number.isNaN(forecastMs)) return true;
   return forecastMs - nowMs <= MAX_NEXT_STOP_MS;
 }

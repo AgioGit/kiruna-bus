@@ -104,11 +104,14 @@
       "properties": { "id": { "type": "integer", "minimum": 1 }, "text": { "type": "string", "minLength": 1 } }
     },
     "lines": { "type": "array", "items": { "$ref": "#/definitions/line" }, "minItems": 1 },
+    "directions": { "type": "array", "items": { "$ref": "#/definitions/line" } },
+    "suggestions": { "type": "array", "items": { "type": "string" } },
     "stop": {
       "type": "object", "required": ["id", "text"],
       "properties": { "id": { "type": "integer", "minimum": 1 }, "text": { "type": "string", "minLength": 1 }, "location": { "anyOf": [{ "$ref": "#/definitions/coordinate" }, { "type": "null" }] } }
     },
     "stops": { "type": "array", "items": { "$ref": "#/definitions/stop" } },
+    "optionalStop": { "anyOf": [{ "$ref": "#/definitions/stop" }, { "type": "null" }] },
     "locatedStop": {
       "allOf": [{ "$ref": "#/definitions/stop" }, { "required": ["location"], "properties": { "location": { "$ref": "#/definitions/coordinate" } } }]
     },
@@ -163,6 +166,7 @@
       "type": "object", "required": ["locations"],
       "properties": { "locations": { "type": "array", "minItems": 2, "items": { "$ref": "#/definitions/coordinate" } } }
     },
+    "positions": { "type": "array", "items": { "allOf": [{ "$ref": "#/definitions/position" }, { "type": "object" }] } },
     "timestamp": {
       "type": "object", "required": ["systemTimestamp", "clientTimestamp"],
       "properties": { "systemTimestamp": { "type": "string", "format": "date-time" }, "clientTimestamp": { "type": "string", "format": "date-time" } }
@@ -201,7 +205,7 @@
     },
     "bootstrap": {
       "type": "object", "required": ["catalog", "source", "serverTime"],
-      "properties": { "catalog": { "$ref": "#/definitions/catalog" }, "source": { "enum": ["bundled", "upstream"] }, "serverTime": { "type": "string", "format": "date-time" } }
+      "properties": { "catalog": { "$ref": "#/definitions/catalog" }, "source": { "enum": ["bundled", "upstream", "retained"] }, "serverTime": { "type": "string", "format": "date-time" } }
     },
     "coverage": {
       "type": "object", "required": ["attempted", "succeeded", "failed"],
@@ -249,7 +253,9 @@
     "service": {
       "type": "object", "required": ["completeUntil", "windows"], "additionalProperties": false,
       "properties": {
-        "completeUntil": { "type": ["string", "null"], "format": "date-time", "description": "Original full stop-scan coverage expiry; null means no verified complete scan." },
+        "completeUntil": { "type": ["string", "null"], "format": "date-time", "description": "Whole-network coverage expiry; null when absent or limited to certain lines." },
+        "classifiedUntil": { "type": "string", "format": "date-time" },
+        "uncertainLineIds": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "uniqueItems": true },
         "windows": {
           "type": "array", "items": {
             "type": "object", "additionalProperties": false, "required": ["lineId", "routeId", "from", "until", "expiresAt"],

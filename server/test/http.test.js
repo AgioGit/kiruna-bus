@@ -56,6 +56,46 @@ test('traffic endpoint is independent of AnyRide and validates methods and queri
   assert.equal((await fetch(`${base}/api/v1/traffic-info`, { method: 'POST' })).status, 405);
 });
 
+test('legacy provider routes return validated JSON and locally generated errors', async (t) => {
+  const { base } = await serve(t, { api: { request: async (path, { search }) => {
+    if (path === '/FindStopArea') return { status: 200, body: Buffer.from('null'), contentType: 'text/plain' };
+    if (search.includes('valid')) return { status: 200, body: Buffer.from('["Town"]'), contentType: 'text/plain' };
+    if (search.includes('rejected')) return { status: 400, body: Buffer.from('internal provider detail') };
+    return { status: 200, body: Buffer.from('{"wrong":true}') };
+  } } });
+  const valid = await fetch(`${base}/api/Autocomplete?query=valid`);
+  assert.match(valid.headers.get('content-type'), /^application\/json/);
+  assert.deepEqual(await valid.json(), ['Town']);
+  const empty = await fetch(`${base}/api/FindStopArea`, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ StopAreaQuery: 'Town' }) });
+  assert.equal(await empty.json(), null);
+  for (const [query, message] of [
+    ['wrong', 'The transit provider returned invalid data.'],
+    ['rejected', 'The transit provider rejected the request.'],
+  ]) {
+    const rejected = await fetch(`${base}/api/Autocomplete?query=${query}`);
+    assert.equal(rejected.status, 502);
+    assert.deepEqual(await rejected.json(), { error: message });
+  }
+});
+
+test('versioned route cache misses require recent observation', async (t) => {
+  let observed = false, requests = 0;
+  const shape = { locations: [{ lat: 67.8, lon: 20 }, { lat: 67.9, lon: 20.2 }] };
+  const { base } = await serve(t, {
+    api: { getMapRoute: async () => { requests++; return shape; } },
+    tracker: { hasObservedRoute: (id) => observed && id === 123 },
+  });
+  const url = `${base}/api/v1/routes/123`;
+  assert.equal((await fetch(url)).status, 404);
+  assert.equal(requests, 0);
+  observed = true;
+  assert.deepEqual(await (await fetch(url)).json(), shape);
+  observed = false;
+  assert.deepEqual(await (await fetch(url)).json(), shape);
+  assert.equal(requests, 1);
+});
+
 test('real traffic adapter uses fixed loopback fixture path without AnyRide headers', async (t) => {
   let requests = 0;
   const upstream = http.createServer((req, res) => {

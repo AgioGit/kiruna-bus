@@ -60,8 +60,9 @@ test('route correction is performed on the server and a failed correction is not
     routes: { 1: { locations: [adolf, lkab] } },
   };
   const catalog = createCatalog({ snapshot: isolated, api });
-  await assert.rejects(catalog.route(540298), /Return shape unavailable/);
+  await assert.rejects(catalog.route(540298, { observed: true }), { code: 'ROUTE_GEOMETRY_UNAVAILABLE' });
   available = true;
+  assert.deepEqual((await catalog.route(540298, { observed: true })).locations, [adolf, street, lkab]);
   assert.deepEqual((await catalog.route(540298)).locations, [adolf, street, lkab]);
   catalog.close();
 });
@@ -176,4 +177,32 @@ test('day-dependent line subset retains validated line and stop coverage, but in
   assert.deepEqual(retained.lineRoutes[absent.id], snapshot.lineRoutes[absent.id]);
   api.getStopAreas = async () => snapshot.stops.slice(1);
   await assert.rejects(captureCatalog({ api, previous: snapshot, lineRoutes: snapshot.lineRoutes }), /coverage decreased/);
+});
+
+test('runtime adds validated stops while retaining missing stops and last-good route shapes', async () => {
+  const api = fakeApi();
+  const newStop = { id: 123, text: 'New stop', location: { lat: 67.85, lon: 20.22 } };
+  const lost = snapshot.stops[0];
+  const badRoute = Number(Object.keys(snapshot.routes)[0]);
+  api.getStopAreas = async (id) => {
+    if (id === snapshot.lines[0].id) throw new Error('incomplete stop list');
+    return [...snapshot.stops.slice(1), newStop];
+  };
+  const find = api.findStopArea;
+  api.findStopArea = (text) => text === newStop.text ? newStop : find(text);
+  api.getCalls = async () => ({ calls: [{ calls: [{ lineId: snapshot.lines[0].id, routeId: 123 }] }] });
+  api.getMapRoute = async (id) => {
+    if (id === badRoute || id === 123) throw new Error('shape unavailable');
+    return snapshot.routes[id];
+  };
+  const catalog = createCatalog({ snapshot, api });
+  try {
+    assert.deepEqual(await catalog.refresh(), { changed: true });
+    assert.equal(catalog.bootstrap().source, 'retained');
+    assert.deepEqual(catalog.stop(newStop.id), newStop);
+    assert.deepEqual(catalog.stop(lost.id), lost);
+    assert.deepEqual(catalog.get().routes[badRoute], snapshot.routes[badRoute]);
+    assert.equal(Object.hasOwn(catalog.get().routes, 123), false);
+    assert.deepEqual(await catalog.refresh({ lineRoutes: { [snapshot.lines[0].id]: [123] } }), { changed: false });
+  } finally { catalog.close(); }
 });

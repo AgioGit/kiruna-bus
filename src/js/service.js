@@ -9,7 +9,10 @@ export function serviceView(data, nowMs) {
   let next = Infinity;
   const completeUntil = Date.parse(data?.completeUntil ?? '');
   const complete = Number.isFinite(completeUntil) && nowMs < completeUntil;
+  const classifiedUntil = Date.parse(data?.classifiedUntil ?? '');
+  const classified = Number.isFinite(classifiedUntil) && nowMs < classifiedUntil;
   if (complete) next = completeUntil;
+  if (classified) next = Math.min(next, classifiedUntil);
   for (const window of data?.windows ?? []) {
     const from = Date.parse(window.from), until = Date.parse(window.until), expires = Date.parse(window.expiresAt);
     if (nowMs >= expires || nowMs > until) continue;
@@ -17,12 +20,12 @@ export function serviceView(data, nowMs) {
     else if (from < expires && from <= until) next = Math.min(next, from);
     next = Math.min(next, expires, until + 1);
   }
-  return { active, complete, next };
+  return { active, complete, classified, uncertainLineIds: new Set(data?.uncertainLineIds), next };
 }
 
 export function routeServiceStatus(view, lineId, routeId) {
   if (view?.active.has(`${lineId}:${routeId}`)) return 'active';
-  return view?.complete ? 'inactive' : 'unknown';
+  return view?.complete || (view?.classified && !view.uncertainLineIds.has(lineId)) ? 'inactive' : 'unknown';
 }
 
 export function visibleLineCount(state) {

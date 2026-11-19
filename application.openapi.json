@@ -34,7 +34,7 @@
       "get": {
         "operationId": "bootstrap",
         "summary": "Basic map catalog without waiting for upstream",
-        "description": "Returns a validated bundled or refreshed catalog. ETag revalidation is supported. X-Server-Time is the current response time, including on 304, and is separate from catalog.capturedAt.",
+        "description": "Returns a validated bundled or refreshed catalog. Source retained means part of the last refresh could not be verified and last-good entries were kept. ETag revalidation is supported. X-Server-Time is the current response time, including on 304, and is separate from catalog.capturedAt.",
         "responses": {
           "200": { "description": "Catalog", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/bootstrap" } } } },
           "304": { "description": "Catalog unchanged; retain cached representation" },
@@ -46,7 +46,7 @@
       "get": {
         "operationId": "buses",
         "summary": "Read the cached live snapshot and register collector activity",
-        "description": "Never waits for or starts a request-specific upstream fetch. Live HTTP reads keep the shared collector active for 120 seconds; SSE connections also keep it active. A successful response can be partial or stale: inspect quality and original GPS timestamps. service.completeUntil is the expiry of the last complete classifiable stop scan, or null; service.windows contain lineId, routeId, from, until and expiresAt timestamps. Each window starts 30 minutes before the earliest observed departure (or arrival if departure is missing) and ends at the last observed call, expiring six minutes after its oldest supporting response. Partial scans may add positive windows but cannot establish absence. Missing service on older servers means unknown, not empty. Boreal supplies limited upcoming calls rather than a timetable. observedLines contains names discovered in calls. generatedAt is response assembly time, not data freshness. epoch identifies the process, revision orders dynamic publications within that epoch, and catalogVersion identifies static content.",
+        "description": "Never waits for or starts a request-specific upstream fetch. Live HTTP reads keep the shared collector active for 120 seconds; SSE connections also keep it active. A successful response can be partial or stale: inspect quality and original GPS timestamps. service.completeUntil is the network-wide coverage expiry, or null. When it is null, optional classifiedUntil and uncertainLineIds together allow absence inference only on other lines until that deadline. Coverage deadlines derive from the oldest response in the last full stop scan; partial scans cannot establish or extend them. service.windows contain lineId, routeId, from, until and expiresAt timestamps. Each window starts 30 minutes before the earliest observed departure (or arrival if departure is missing) and ends at the last observed call, expiring six minutes after its oldest supporting response. Missing service on older servers means unknown, not empty. Boreal supplies limited upcoming calls rather than a timetable. A stop with no forecast keeps forecastTime null and uses plannedTime. observedLines contains names discovered in calls. generatedAt is response assembly time, not data freshness. epoch identifies the process, revision orders dynamic publications within that epoch, and catalogVersion identifies static content.",
         "responses": {
           "200": { "description": "Vehicle snapshot", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/buses" } } } },
           "503": { "$ref": "#/components/responses/Error" },
@@ -58,7 +58,7 @@
       "get": {
         "operationId": "streamBuses",
         "summary": "Subscribe to complete live snapshots over server-sent events",
-        "description": "Keeps the shared collector active until disconnected. Immediately sends a full cached buses event or tracking-status when tracking is warming/unavailable; completed collection cycles publish subsequent events. IDs are epoch:revision. Last-Event-ID is not replayed: every connection resynchronizes with the current full snapshot. Heartbeat comments arrive every 15 seconds and do not establish data freshness or reset the browser's 60-second snapshot watchdog. Status-only events do not reset it either. Connections and slow-reader buffers are bounded; shutdown closes streams.",
+        "description": "Keeps the shared collector active until disconnected. Immediately sends a full cached buses event or tracking-status when tracking is warming/unavailable. A dynamic cycle can publish updated departures and service evidence before GPS completes, in a separate revision. IDs are epoch:revision. Last-Event-ID is not replayed: every connection resynchronizes with the current full snapshot. Heartbeat comments arrive every 15 seconds and do not establish data freshness or reset the browser's 60-second snapshot watchdog. Status-only events do not reset it either. Connections and slow-reader buffers are bounded; shutdown closes streams.",
         "responses": {
           "200": {
             "description": "Incremental UTF-8 SSE frames. Named events have JSON data matching the event schemas below. Headers disable caching/transformation and request proxy buffering to be disabled.",
@@ -105,10 +105,12 @@
       "get": {
         "operationId": "route",
         "summary": "Display-ready route geometry with provider corrections applied",
+        "description": "Serves catalog and cached geometry. A cache miss triggers an upstream lookup only for route IDs recently observed in calls, service evidence, or unexpired vehicles.",
         "parameters": [{ "name": "routeId", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }],
         "responses": {
           "200": { "description": "Geometry", "content": { "application/json": { "schema": { "$ref": "./server/schemas.json#/definitions/route" } } } },
           "304": { "description": "Geometry unchanged" },
+          "404": { "$ref": "#/components/responses/Error" },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }

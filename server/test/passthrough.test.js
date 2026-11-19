@@ -4,11 +4,19 @@ import { createPassthrough } from '../lib/passthrough.js';
 import { TtlCache } from '../lib/cache.js';
 
 function fakeRequest(status = 200) {
+  const timestamp = '2026-10-25T10:00:00Z';
+  const data = {
+    '/GetLines': [{ id: 1, text: 'Town' }],
+    '/GetCalls': { calls: [] },
+    '/GetMapRoute': { locations: [{ lat: 67.8, lon: 20.1 }, { lat: 67.9, lon: 20.2 }] },
+    '/GetSystemTimestamp': { clientTimestamp: timestamp, systemTimestamp: timestamp },
+    '/GetConfigOptions': { minZoom: 10, tiles: { urlTemplate: 'https://example.test/{z}/{x}/{y}.png' } },
+  };
   const calls = [];
   const request = async (path, options) => {
     calls.push({ path, ...options });
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return { status, contentType: 'application/json', body: Buffer.from('[]') };
+    return { status, body: Buffer.from(JSON.stringify(data[path])) };
   };
   return { request, calls };
 }
@@ -44,8 +52,8 @@ test('never caches GetSystemTimestamp and does not cache non-200 responses', asy
 
   const bad = fakeRequest(500);
   const b = createPassthrough({ request: bad.request });
-  await b('/GetLines', { method: 'GET' });
-  await b('/GetLines', { method: 'GET' });
+  await assert.rejects(b('/GetLines', { method: 'GET' }), { code: 'UPSTREAM_REJECTED' });
+  await assert.rejects(b('/GetLines', { method: 'GET' }), { code: 'UPSTREAM_REJECTED' });
   assert.equal(bad.calls.length, 2);
 });
 

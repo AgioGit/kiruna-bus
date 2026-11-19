@@ -94,7 +94,10 @@ collection runs. With no usable live snapshot, the HTTP API returns `503`
 (`WARMING_UP` or `LIVE_UNAVAILABLE`) and `Retry-After: 5`.
 
 The collector scans stop calls and then positions every 30 seconds by default
-(configurable to 60 seconds). Cycles do not overlap or queue catch-up work.
+(configurable to 60 seconds). Dynamic cycles do not overlap with each other or
+queue catch-up work. Calls and departure history are published before GPS.
+GPS has a separate ten-second budget; a timeout preserves departures and
+settled fixes, and does not back off the next calls scan.
 Failed stops retain their original results for at most six minutes,
 independent of the configured interval, and are reported as partial coverage.
 The shared raw-call cache is bounded to 1,000 stops and 16 MiB. Over-budget
@@ -112,12 +115,12 @@ after its oldest supporting stop response. When observations have different
 ages, fresher calls also support their own narrower windows. A per-route
 interval envelope retains the latest supporting expiry at each service instant,
 coalescing overlap without extending any unsupported portion.
-`service.completeUntil` is the expiry of the oldest response in the last
-complete, classifiable scan; incomplete scans can add positive evidence but
-cannot establish absence, and never extend that deadline. The browser hides
-unobserved variants only while complete coverage remains valid; otherwise it
-shows them faded with an unknown notice. Missing service fields from older
-servers are unknown. Geometry and manual filters remain independent.
+Coverage expires six minutes after the oldest response in the last full stop
+scan. If a call cannot be classified but its line is known, the browser can
+still hide unobserved variants on other lines until that deadline. Partial
+scans can add positive evidence or uncertainty, but cannot establish absence
+or extend coverage. Unknown routes remain faded; geometry and manual filters
+remain independent.
 The source returns only limited upcoming calls, not a full timetable; if an
 origin or entire trip is not reported, its actual start or existence cannot be
 inferred reliably. Absolute timestamp instants handle timezone and DST changes.
@@ -204,8 +207,10 @@ status can no longer change. A connected stream is not proof of fresh GPS.
 
 Both `buses` transports carry `service: {completeUntil, windows}`. Each window
 has `lineId`, `routeId`, `from`, `until`, and `expiresAt` ISO timestamps.
-`completeUntil: null` means there is no verified complete scan; an empty
-`windows` array is authoritative only before a non-null `completeUntil`.
+`completeUntil: null` disables network-wide absence inference. In that case,
+optional `classifiedUntil` and `uncertainLineIds` together allow absence
+inference only on lines outside the excluded set until the deadline.
+Clients that do not understand these fields still treat absence as unknown.
 The original response timestamps, not `generatedAt`, heartbeats or duplicate
 snapshots, determine expiration. `observedLines` supplies line IDs and labels
 from calls, unexpired retained call evidence, and retained fresh vehicles when
@@ -226,7 +231,9 @@ bootstrap when it changes; they do not receive route geometry in every push.
 Capture/check timestamps do not change the content version by themselves.
 
 Legacy `/api/buses`, `/api/stops`, `/api/health`, and allow-listed Boreal passthrough
-routes remain temporarily with their old response shapes. Legacy use is counted.
+routes remain temporarily. The allow-list serves validated JSON with a local
+media type and structured errors instead of forwarding upstream errors or redirects.
+Legacy use is counted.
 Do not build new clients against them; removal is a separate change after usage
 is assessed. The legacy bus route can still wait for the shared due/in-flight refresh, without
 starting an extra collection cycle.
@@ -234,10 +241,11 @@ starting an extra collection cycle.
 ## Upstream protection and operations
 
 All upstream work shares coalescing, successful-response caches, byte bounds, a
-bounded scheduler, and deadlines covering response bodies. One concurrency slot
-is reserved for interactive work. Caller cancellation does not cancel shared
-refreshes. Only transient failures are retried once; invalid payloads and
-permanent errors do not enter successful caches.
+bounded scheduler, and deadlines covering response bodies. Live collection
+gets a reserved concurrency slot and priority over catalog and public work;
+public work cannot fill the whole queue. Lower-priority requests may join
+existing higher-priority requests but not the reverse. Canceling the last
+waiter cancels the shared request. Only transient failures are retried once.
 
 Structured JSON logs include request/refresh IDs, sanitized endpoint names,
 durations, cache/refresh outcomes, coverage, and stable failure codes. They do
@@ -318,14 +326,25 @@ later generations can reuse the previous route catalog. Review the snapshot
 diff, provenance, and capture time before releasing it. Do not hand-edit data to
 pretend a partial capture is complete.
 
-In-memory catalog refreshes also use validated captures and keep the previous
-catalog on failure. The collector checks static source data every 15 minutes
+In-memory catalog refreshes can publish validated additions alongside retained
+last-good entries (`source: retained`). An unresolved geometry is not included
+in a new route association. Both LKAB variants retain their previous shapes
+if the pair cannot be verified. The collector checks static data every 15 minutes
 while active, reusing dynamic call results for route discovery. The check
 waits for an in-flight dynamic cycle before consuming its associations.
 Newly discovered stops alone may need bounded calls to discover their routes;
 known stops are not rescanned by the static cycle. The check
 revalidates the source rather than silently reading a longer-lived adapter
 cache. Runtime refreshes are not written back to the deployed image.
+
+If a timetable change replaces or removes a stop ID, the runtime refresh can
+add the replacement but does not delete the old stop automatically. Generate
+a candidate in a separate `SNAPSHOT_PATH` seeded from the accepted catalog and
+compare its line and stop IDs before accepting removals. `--accept-removals`
+also stops retaining lines absent from the current `GetLines` result, which
+can omit legitimate day-dependent service. Do not treat all candidate
+removals as confirmed timetable changes. Ship the reviewed baseline in a new
+image; restarting the current image restores the same bundled catalog.
 
 ## Local verification
 
@@ -397,13 +416,22 @@ published SHA tag or preferably the registry digest, never `latest` as the
 release identity:
 
 ```powershell
-$image = 'ghcr.io/mhedqvist/boreal-bus@sha256:<verified-digest>'
+$image = 'ghcr.io/agiogit/kiruna-bus@sha256:<verified-digest>'
 az containerapp update -n boreal-bus -g rg-boreal-bus --image $image `
   --revision-suffix r$(Get-Date -Format yyyyMMddHHmm)
 ```
 
-Check readiness, bundled startup, and live status separately. For rollback,
-repeat the update with the recorded previous digest and a new revision suffix,
-then repeat those checks. In-memory state is intentionally disposable; the
-bundled baseline must work immediately after either deployment. No cloud
-resources or automatic deployment credentials are provisioned by this project.
+Verify that the ready revision receives traffic over the real ingress. Check
+`/api/live` and `/api/ready` for process and basic-map readiness, then check
+`/api/v1/bootstrap` for the expected catalog and `/api/v1/buses` for usable live
+data. An SSE `tracking-status` event confirms delivery of that event, not that
+a bus snapshot is available. If live reads still return `503` after warmup,
+use `/api/status` and server logs to distinguish a failed or partial scan from
+a successful empty service period. Probe success does not certify Boreal
+availability.
+
+For rollback, repeat the update with the recorded previous digest and a new
+revision suffix, then repeat those checks. In-memory state is intentionally
+disposable; the bundled baseline must work immediately after either
+deployment. No cloud resources or automatic deployment credentials are
+provisioned by this project.

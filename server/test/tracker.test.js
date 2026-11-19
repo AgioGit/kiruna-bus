@@ -349,10 +349,11 @@ test('scan failure is unavailable without data, retains known fixes, and pure re
   assert.match(stale.error, /Unable to refresh live bus data/);
 });
 
-test('a blocked collection does not stall reads or expose intermediate call results', async () => {
+test('calls publish before pending GPS, retaining the original fix until the next revision', async () => {
   const fake = fakeApi();
   const tracker = trackerWith(fake);
   const initial = await collectSnapshot(tracker);
+  const initialRevision = tracker.getRevision();
   const getCalls = fake.api.getCalls;
   fake.api.getCalls = async (stop) => {
     const response = await getCalls(stop);
@@ -362,19 +363,60 @@ test('a blocked collection does not stall reads or expose intermediate call resu
   let release;
   fake.api.getVehiclePosition = () => new Promise((resolve) => { release = resolve; });
   fake.state.now += 20_000;
-  const pending = tracker.collect();
+  const revisions = [];
+  const pending = tracker.collect({ onCalls: () => revisions.push(tracker.getRevision()) });
   await new Promise((resolve) => setImmediate(resolve));
   try {
     const cached = tracker.getSnapshot();
     assert.equal(tracker.status().refreshing, true);
-    assert.equal(cached.vehicles[0].destination, initial.vehicles[0].destination);
-    assert.equal(tracker.getStopCalls(1).calls[0].destination, initial.vehicles[0].destination);
+    assert.equal(tracker.getStopCalls(1).calls[0].destination, 'Updated destination');
+    assert.equal(cached.vehicles[0].position.timestamp, initial.vehicles[0].position.timestamp);
+    assert.equal(cached.vehicles[0].stale, initial.vehicles[0].stale);
+    assert.deepEqual(revisions, [initialRevision + 1]);
   } finally {
     release({ location: { lat: 67.85, lon: 20.22 }, timestamp: new Date(fake.state.now).toISOString() });
     await pending;
     tracker.close();
   }
   assert.equal(tracker.getSnapshot().vehicles[0].destination, 'Updated destination');
+  assert.equal(tracker.getRevision(), initialRevision + 2);
+});
+
+test('a GPS deadline preserves fresh departures, good fixes, and planned-only upcoming stops', async () => {
+  const at = Date.parse('2026-10-25T10:00:00Z');
+  const time = (minutes) => new Date(at + minutes * 60_000).toISOString();
+  const stops = [{ id: 1, text: 'A' }, { id: 2, text: 'B' }, { id: 3, text: 'C' }];
+  const calls = [
+    { id: '1', journeyId: 1, lineId: 10, routeId: 100, sequenceNumber: 1, line: 'Röd.', destination: 'C',
+      departure: { plannedTime: time(2), forecastTime: time(3) } },
+    { id: '2', journeyId: 1, lineId: 10, routeId: 100, sequenceNumber: 2, line: 'Röd.', destination: 'C',
+      departure: { plannedTime: time(4), forecastTime: null } },
+    { id: '3', journeyId: 2, lineId: 11, routeId: 101, sequenceNumber: 1, line: 'Grön.', destination: 'C',
+      departure: { plannedTime: time(5), forecastTime: null } },
+  ];
+  const api = {
+    getSystemTimestamp: async (clientTimestamp) => ({ clientTimestamp, systemTimestamp: clientTimestamp }),
+    getCalls: async (text) => ({ calls: [{ calls: [calls[stops.findIndex((stop) => stop.text === text)]] }] }),
+    getVehiclePosition: async (id) => id === '2'
+      ? { location: { lat: 67.85, lon: 20.22 }, timestamp: time(0) }
+      : new Promise(() => {}),
+  };
+  const tracker = createTracker({ api, now: () => at, initialStops: stops, options: { positionTimeoutMs: 20 } });
+  const keepAlive = setInterval(() => {}, 1000); // AbortSignal.timeout is unref'ed.
+  try {
+    await tracker.collect();
+    const snapshot = tracker.getSnapshot();
+    assert.equal(snapshot.quality.scan.succeeded, 3);
+    assert.equal(snapshot.quality.positions.failed, 1);
+    assert.equal(snapshot.quality.positions.succeeded, 1);
+    assert.equal(tracker.getStopCalls(2).at, at);
+    assert.deepEqual(snapshot.vehicles[0].upcomingStops.map((stop) => stop.stopText), ['A', 'B']);
+    assert.equal(snapshot.vehicles[0].followingStop.forecastTime, null);
+    assert.equal(snapshot.vehicles[0].followingStop.plannedTime, time(4));
+  } finally {
+    clearInterval(keepAlive);
+    tracker.close();
+  }
 });
 
 test('positions that all come back empty are reported as an error', async () => {

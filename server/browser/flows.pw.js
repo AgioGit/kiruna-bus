@@ -13,7 +13,8 @@ test.beforeEach(async ({ page, request }) => {
     const url = route.request().url();
     if (url.endsWith('/leaflet.js') || url.endsWith('/leaflet.css')) {
       const filename = url.endsWith('.js') ? 'leaflet.js' : 'leaflet.css';
-      await route.fulfill({ path: fileURLToPath(new URL(`../node_modules/leaflet/dist/${filename}`, import.meta.url)) });
+      await route.fulfill({ path: fileURLToPath(new URL(`../node_modules/leaflet/dist/${filename}`, import.meta.url)),
+        headers: { 'Access-Control-Allow-Origin': '*' } });
     } else {
       await route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j1ioAAAAASUVORK5CYII=', 'base64') });
     }

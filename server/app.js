@@ -279,7 +279,8 @@ export function createApplication({
       }
       if (/^\/api\/v1\/routes\/[^/]+$/.test(pathname)) {
         method(['GET']); checkQuery(url);
-        return json(200, await catalog.route(positiveId(pathname.split('/').at(-1))), { schema: 'route', etag: true });
+        const id = positiveId(pathname.split('/').at(-1));
+        return json(200, await catalog.route(id, { observed: () => tracker.hasObservedRoute?.(id) === true }), { schema: 'route', etag: true });
       }
       const match = /^\/api\/v1\/stops\/([^/]+)\/departures$/.exec(pathname);
       if (match) {
@@ -368,7 +369,7 @@ export function createApplication({
         }
         telemetry.count('legacyRequests');
         const upstream = await passthrough(endpoint, { method: req.method, search: url.search, body: body ? JSON.stringify(body) : undefined });
-        res.writeHead(upstream.status, { 'Content-Type': upstream.contentType ?? 'application/json', 'Cache-Control': 'no-cache', 'X-Cache': upstream.cache });
+        res.writeHead(upstream.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Cache': upstream.cache });
         return res.end(upstream.body);
       }
       throw new AppError('NOT_FOUND', 'Unknown endpoint', { status: 404 });

@@ -1,13 +1,18 @@
-// Runs worker(item) over items with bounded concurrency. Rejects on cancellation;
+// Runs worker(item) over items with bounded concurrency. With keepPartial,
+// cancellation preserves settled results and marks unfinished items rejected;
+// otherwise cancellation rejects the pool.
 // each result is { status: 'fulfilled', value } or { status: 'rejected', reason },
 // in the same order as items.
-export async function runPooled(items, concurrency, worker, { signal } = {}) {
+export async function runPooled(items, concurrency, worker, { signal, keepPartial = false } = {}) {
   const results = new Array(items.length);
   let next = 0;
 
   async function run() {
     while (next < items.length) {
-      signal?.throwIfAborted();
+      if (signal?.aborted) {
+        if (keepPartial) return;
+        throw signal.reason;
+      }
       const index = next++;
       try {
         results[index] = { status: 'fulfilled', value: await withSignal(Promise.resolve().then(() => worker(items[index], index)), signal) };
@@ -18,7 +23,9 @@ export async function runPooled(items, concurrency, worker, { signal } = {}) {
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  return results;
+  return keepPartial
+    ? Array.from(results, (result) => result ?? { status: 'rejected', reason: signal.reason })
+    : results;
 }
 export function withSignal(pending, signal) {
   if (!signal) return pending;

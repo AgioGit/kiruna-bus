@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { setMaxListeners } from 'node:events';
 import { AppError } from './errors.js';
 import { canonicalJson } from './boreal.js';
-import { runPooled, withSignal } from './pool.js';
+import { runPooled } from './pool.js';
+import { TtlCache } from './cache.js';
 import { validate } from './validation.js';
 import { correctLkabBoundRoute, LKAB_BOUND_ROUTE_ID, LKAB_RETURN_ROUTE_ID } from './routeCorrections.js';
 
@@ -11,6 +12,8 @@ const point = ({ lat, lon }) => ({ lat, lon });
 const lineDto = ({ id, text }) => ({ id, text });
 const stopDto = ({ id, text, location }) => ({ id, text, location: point(location) });
 export const routeDto = (route) => ({ locations: route.locations.map(point) });
+const MAX_STOPS = 1000;
+const MAX_ROUTES = 256;
 
 export function sealCatalog(data) {
   // Content hash excludes capturedAt: an unchanged successful check (same
@@ -44,31 +47,53 @@ export function loadCatalog(file) {
 
 export async function captureCatalog({
   api, previous, signal, acceptRemovals = false, now = Date.now, fresh = false, lineRoutes: suppliedLineRoutes,
+  onDegraded, shutdownSignal,
 }) {
   if (signal) setMaxListeners(32, signal); // Eight workers each have bounded queue/wait cancellation listeners.
   const options = { signal, priority: 'background', fresh };
-  const [config, rawLines] = await withSignal(Promise.all([api.getConfig(options), api.getLines(options)]), signal);
-  const currentLines = validate('lines', rawLines, { upstream: true }).map(lineDto);
+  const runtime = Boolean(onDegraded);
+  const pool = { signal, keepPartial: runtime };
+  const issues = { config: 0, lines: 0, stopLists: 0, missingStops: 0, stopLocations: 0, calls: 0, shapes: 0, capacity: 0 };
+  const [configResult, lineResult] = await runPooled([
+    async () => {
+      const { minZoom, tiles } = await api.getConfig(options);
+      return validate('mapConfig', { minZoom, tiles: { urlTemplate: tiles?.urlTemplate } });
+    },
+    async () => validate('lines', await api.getLines(options), { upstream: true }).map(lineDto),
+  ], 2, (read) => read(), pool);
+  if (configResult.status === 'rejected' && !runtime) throw configResult.reason;
+  if (lineResult.status === 'rejected' && !runtime) throw lineResult.reason;
+  issues.config = Number(configResult.status === 'rejected');
+  issues.lines = Number(lineResult.status === 'rejected');
+  const config = configResult.value ?? previous.config;
+  const currentLines = lineResult.value ?? previous.lines;
   // GetLines is day-dependent. Recheck previously validated lines' stops,
   // rather than interpreting their absence today as a catalog deletion.
   const lines = acceptRemovals ? currentLines : [...currentLines,
     ...(previous?.lines ?? []).filter((line) => !currentLines.some((item) => item.id === line.id))];
-  const areas = await runPooled(lines, 8, (line) => api.getStopAreas(line.id, options), { signal });
-  const failedArea = areas.find((result) => result.status === 'rejected');
-  if (failedArea) throw failedArea.reason;
-  const byId = new Map(areas.flatMap((result) => result.value).map((stop) => [stop.id, stop]));
+  const areas = await runPooled(lines, 8, (line) => api.getStopAreas(line.id, options), pool);
+  const areaFailures = areas.filter((result) => result.status === 'rejected');
+  if (areaFailures.length && (!runtime || (issues.lines && issues.config && areaFailures.length === areas.length))) throw areaFailures[0].reason;
+  issues.stopLists = areaFailures.length;
+  const byId = new Map(areas.flatMap((result) => result.value ?? []).map((stop) => [stop.id, stop]));
   const located = await runPooled([...byId.values()], 8, async (stop) => {
     const found = await api.findStopArea(stop.text, options);
     return stopDto(validate('locatedStop', { ...stop, location: found?.location }, { upstream: true }));
-  }, { signal });
-  const failed = located.find((result) => result.status === 'rejected');
-  if (failed) throw failed.reason;
-  const stops = located.map((result) => result.value);
-  if (previous && !acceptRemovals) {
-    if (previous.stops.some((stop) => !byId.has(stop.id))) {
-      throw new Error('Catalog coverage decreased; review removals before using --accept-removals');
-    }
+  }, pool);
+  const locationFailures = located.filter((result) => result.status === 'rejected');
+  if (locationFailures.length && !onDegraded) throw locationFailures[0].reason;
+  issues.stopLocations = locationFailures.length;
+  issues.missingStops = previous?.stops.filter((stop) => !byId.has(stop.id)).length ?? 0;
+  if (issues.missingStops && !acceptRemovals && !onDegraded) {
+    throw new Error('Catalog coverage decreased; review removals before using --accept-removals');
   }
+  const stopsById = new Map(onDegraded ? previous.stops.map((stop) => [stop.id, stop]) : []);
+  for (const { value } of located) {
+    if (!value) continue;
+    if (onDegraded && !stopsById.has(value.id) && stopsById.size >= MAX_STOPS) issues.capacity++;
+    else stopsById.set(value.id, value);
+  }
+  const stops = [...stopsById.values()];
   const lineRoutes = Object.fromEntries(lines.map((line) => [line.id, new Set(previous?.lineRoutes[line.id] ?? [])]));
   if (suppliedLineRoutes) {
     // Consume call/route associations already collected by the shared live
@@ -80,10 +105,12 @@ export async function captureCatalog({
     const previousStops = new Set(previous?.stops.map((stop) => stop.id));
     const newStops = stops.filter((stop) => !previousStops.has(stop.id));
     if (newStops.length) {
-      const results = await runPooled(newStops, 8, (stop) => api.getCalls(stop.text, options), { signal });
-      const failed = results.find((result) => result.status === 'rejected');
-      if (failed) throw failed.reason;
+      const results = await runPooled(newStops, 8, (stop) => api.getCalls(stop.text, options), pool);
+      const failures = results.filter((result) => result.status === 'rejected');
+      if (failures.length && !onDegraded) throw failures[0].reason;
+      issues.calls = failures.length;
       for (const result of results) {
+        if (result.status === 'rejected') continue;
         for (const call of result.value.calls.flatMap((group) => group.calls)) {
           if (call.routeId && lineRoutes[call.lineId]) lineRoutes[call.lineId].add(call.routeId);
         }
@@ -99,22 +126,48 @@ export async function captureCatalog({
       }
     }
   }
-  const ids = [...new Set(Object.values(lineRoutes).flatMap((set) => [...set]))];
+  let ids = [...new Set([
+    ...(runtime ? Object.keys(previous.routes).map(Number) : []),
+    ...Object.values(lineRoutes).flatMap((set) => [...set]),
+  ])];
   if (ids.includes(LKAB_BOUND_ROUTE_ID) && !ids.includes(LKAB_RETURN_ROUTE_ID)) ids.push(LKAB_RETURN_ROUTE_ID);
-  if (ids.length > 256) throw new Error('Catalog route limit exceeded; review obsolete route associations');
-  const shapes = await runPooled(ids, 8, async (id) => [id, routeDto(validate('route', await api.getMapRoute(id, options), { upstream: true }))], { signal });
-  const failedShape = shapes.find((result) => result.status === 'rejected');
-  if (failedShape) throw failedShape.reason;
-  const routes = Object.fromEntries(shapes.map((result) => result.value));
-  if (routes[LKAB_BOUND_ROUTE_ID]) {
-    routes[LKAB_BOUND_ROUTE_ID] = correctLkabBoundRoute(routes[LKAB_BOUND_ROUTE_ID], routes[LKAB_RETURN_ROUTE_ID]);
+  if (ids.length > MAX_ROUTES) {
+    if (!onDegraded) throw new Error('Catalog route limit exceeded; review obsolete route associations');
+    issues.capacity += ids.length - MAX_ROUTES;
+    ids.sort((a, b) => Number(Object.hasOwn(previous.routes, b)) - Number(Object.hasOwn(previous.routes, a)) || a - b);
+    ids = ids.slice(0, MAX_ROUTES);
   }
-  signal?.throwIfAborted();
-  return sealCatalog({
+  const shapes = await runPooled(ids, 8, async (id) => [id, routeDto(validate('route', await api.getMapRoute(id, options), { upstream: true }))], pool);
+  const failedShape = shapes.find((result) => result.status === 'rejected');
+  if (failedShape && !onDegraded) throw failedShape.reason;
+  const fetchedRoutes = Object.fromEntries(shapes.flatMap((result) => result.value ? [result.value] : []));
+  issues.shapes = shapes.length - Object.keys(fetchedRoutes).length;
+  if (ids.includes(LKAB_BOUND_ROUTE_ID)) {
+    try {
+      if (!fetchedRoutes[LKAB_BOUND_ROUTE_ID] || !fetchedRoutes[LKAB_RETURN_ROUTE_ID]) throw new Error('Either LKAB route shape is missing.');
+      fetchedRoutes[LKAB_BOUND_ROUTE_ID] = correctLkabBoundRoute(fetchedRoutes[LKAB_BOUND_ROUTE_ID], fetchedRoutes[LKAB_RETURN_ROUTE_ID]);
+    } catch (error) {
+      if (!onDegraded) throw error;
+      delete fetchedRoutes[LKAB_BOUND_ROUTE_ID];
+      delete fetchedRoutes[LKAB_RETURN_ROUTE_ID];
+      issues.shapes = shapes.length - Object.keys(fetchedRoutes).length;
+    }
+  }
+  const routes = Object.fromEntries(ids.flatMap((id) => {
+    const shape = fetchedRoutes[id] ?? (onDegraded ? previous.routes[id] : undefined);
+    return shape ? [[id, shape]] : [];
+  }));
+  for (const set of Object.values(lineRoutes)) {
+    for (const id of set) if (!Object.hasOwn(routes, id)) set.delete(id);
+  }
+  (runtime ? shutdownSignal : signal)?.throwIfAborted();
+  const catalog = sealCatalog({
     schemaVersion: 1, capturedAt: new Date(now()).toISOString(), provenance: 'Boreal AnyRide; validated basic-data capture',
-    config: validate('mapConfig', { minZoom: config.minZoom, tiles: { urlTemplate: config.tiles?.urlTemplate } }),
+    config,
     lines, stops, lineRoutes: Object.fromEntries(Object.entries(lineRoutes).map(([id, set]) => [id, [...set].sort((a, b) => a - b)])), routes,
   });
+  if (onDegraded && Object.values(issues).some(Boolean)) onDegraded(issues);
+  return catalog;
 }
 
 export function createCatalog({ snapshot, api, telemetry, now = Date.now, refreshTimeoutMs = 60000 }) {
@@ -122,7 +175,7 @@ export function createCatalog({ snapshot, api, telemetry, now = Date.now, refres
   let source = 'bundled';
   let refreshing;
   const shutdown = new AbortController();
-  const dynamicRoutes = new Map();
+  const dynamicRoutes = new TtlCache({ maxEntries: MAX_ROUTES, now });
   return {
     get: () => current,
     bootstrap: () => ({ catalog: current, source, serverTime: new Date(now()).toISOString() }),
@@ -133,14 +186,20 @@ export function createCatalog({ snapshot, api, telemetry, now = Date.now, refres
     // call/route associations instead of this doing its own per-stop scan.
     async refresh({ fresh = false, lineRoutes } = {}) {
       if (!refreshing && !shutdown.signal.aborted) {
+        let degraded = false;
         refreshing = captureCatalog({
-          api, previous: current, now, fresh, lineRoutes,
+          api, previous: current, now, fresh, lineRoutes: lineRoutes ?? {},
+          onDegraded(issues) {
+            degraded = true;
+            telemetry?.count('catalogDegraded');
+            telemetry?.log('catalog_refresh_degraded', issues);
+          },
+          shutdownSignal: shutdown.signal,
           signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(refreshTimeoutMs)]),
         }).then((catalog) => {
           const changed = catalog.version !== current.version;
-          current = catalog;
-          source = 'upstream';
-          if (changed) dynamicRoutes.clear();
+          if (changed || !degraded) current = catalog;
+          source = degraded ? 'retained' : 'upstream';
           return { changed };
         }).catch((error) => {
           telemetry?.count('catalogFailures');
@@ -150,13 +209,20 @@ export function createCatalog({ snapshot, api, telemetry, now = Date.now, refres
       }
       return refreshing ?? Promise.resolve({ changed: false });
     },
-    async route(id) {
-      const known = current.routes[id] ?? dynamicRoutes.get(id);
+    async route(id, { observed = false } = {}) {
+      const key = String(id);
+      const known = current.routes[id] ?? dynamicRoutes.get(key);
       if (known) return known;
-      let route = routeDto(await api.getMapRoute(id));
-      if (id === LKAB_BOUND_ROUTE_ID) route = correctLkabBoundRoute(route, await api.getMapRoute(LKAB_RETURN_ROUTE_ID));
-      if (dynamicRoutes.size >= 256) dynamicRoutes.delete(dynamicRoutes.keys().next().value);
-      dynamicRoutes.set(id, route);
+      if (!(typeof observed === 'function' ? observed() : observed)) {
+        throw new AppError('ROUTE_NOT_FOUND', 'That route is not in the catalog or recently observed.', { status: 404 });
+      }
+      const options = { priority: 'public', signal: shutdown.signal };
+      let route = routeDto(await api.getMapRoute(id, options));
+      if (id === LKAB_BOUND_ROUTE_ID) {
+        try { route = correctLkabBoundRoute(route, await api.getMapRoute(LKAB_RETURN_ROUTE_ID, options)); }
+        catch (cause) { throw new AppError('ROUTE_GEOMETRY_UNAVAILABLE', 'Corrected route geometry is unavailable.', { status: 502, cause }); }
+      }
+      dynamicRoutes.set(key, route, 60 * 60 * 1000);
       return route;
     },
     stop(id) {

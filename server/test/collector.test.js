@@ -272,6 +272,28 @@ test('failed source coverage backs off even when retained positions still make a
   assert.ok(collector.status().dynamic.backoffUntil);
 });
 
+test('calls notify listeners before GPS and GPS-only degradation does not back off the next scan', async (t) => {
+  const { config, tracker, catalog, state } = makeDoubles();
+  let release;
+  const gps = new Promise((resolve) => { release = resolve; });
+  tracker.collect = async ({ onCalls }) => {
+    state.snapshotThrows = false;
+    onCalls();
+    await gps;
+    state.snapshotValue = { vehicles: [], quality: { scan: { failed: 0 }, positions: { failed: 1 } } };
+  };
+  const collector = createCollector({ tracker, catalog, config, telemetry: silent() });
+  t.after(() => collector.close());
+  const updates = [];
+  collector.onUpdate(() => updates.push(tracker.getSnapshot()));
+  const cycle = collector.forceDynamicCycle();
+  assert.deepEqual(updates, [{ vehicles: [] }]);
+  release();
+  await cycle;
+  assert.equal(updates[1].quality.positions.failed, 1);
+  assert.equal(collector.status().dynamic.backoffUntil, null);
+});
+
 test('forceDynamicCycle/forceStaticCycle reject on failure and resolve with real data on success', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const { config, tracker, catalog, state } = makeDoubles();

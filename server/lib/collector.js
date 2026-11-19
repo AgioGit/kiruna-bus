@@ -48,6 +48,7 @@ export function createCollector({
 
   const listeners = new Set();
   function notify() {
+    if (closed) return;
     for (const fn of listeners) {
       try { fn(); } catch (error) { telemetry?.log('collector_listener_failed', { code: error.code ?? error.name }); }
     }
@@ -102,11 +103,11 @@ export function createCollector({
     if (dynamicCycle) return dynamicCycle;
     lastDynamicAttemptAt = now();
     dynamicCycle = (async () => {
-      await tracker.collect({ fresh: true, ...opts });
+      await tracker.collect({ fresh: true, ...opts, onCalls: notify });
       let ok = true;
       try {
         const snapshot = tracker.getSnapshot();
-        ok = !(snapshot.quality?.scan.failed || snapshot.quality?.positions.failed);
+        ok = !snapshot.quality?.scan.failed;
       } catch (error) {
         telemetry?.log('dynamic_snapshot_unavailable', { code: error.code ?? error.name });
         ok = false;
@@ -176,8 +177,7 @@ export function createCollector({
       sseCount = Math.max(0, sseCount - 1);
     },
 
-    // Fires after every completed cycle (dynamic or static, success or
-    // failure) so transports (SSE) can push a fresh snapshot/status.
+    // Fires when calls are committed ahead of GPS and after each cycle.
     onUpdate(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);

@@ -1,5 +1,6 @@
 import { api, ApiError } from './api.js';
 import { store } from './appState.js';
+import { addActiveLineIds } from './filters.js';
 import { mergeLineRoutes } from './routes.js';
 import { CLOCK_SAMPLE_MAX_AGE, synchronizeClock, subscribeClock, now } from './clock.js';
 import { acceptRevision, classifyRevision, getTrackingState, isValidBusesSnapshot } from './tracking.js';
@@ -68,7 +69,7 @@ export function applySnapshot(data) {
     .map((line) => [line.id, line])).values()];
   if (newLines.length) store.set({
     lines: [...state.lines, ...newLines],
-    activeLineIds: new Set([...state.activeLineIds, ...newLines.map((line) => line.id)]),
+    activeLineIds: addActiveLineIds(state.activeLineIds, newLines),
   });
   applyService(data.service);
   expirePositions(vehicles);

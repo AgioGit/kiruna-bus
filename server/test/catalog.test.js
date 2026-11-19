@@ -136,6 +136,34 @@ test('a newly discovered line can resolve routes from new stops without rescanni
   } finally { catalog.close(); }
 });
 
+test('a line with no observed routes does not block catalog updates or later route discovery', async () => {
+  const api = fakeApi();
+  const line = { id: 110000001, text: 'Tåg.' };
+  const stop = { id: 110084991, text: 'Kiruna Järnvägsstation (84991)', location: { lat: 67.8677, lon: 20.20018 } };
+  api.getLines = async () => [...snapshot.lines, line];
+  api.getStopAreas = async (id) => id === line.id ? [stop] : snapshot.stops;
+  const findStop = api.findStopArea;
+  api.findStopArea = (text) => text === stop.text ? stop : findStop(text);
+  const catalog = createCatalog({ snapshot, api });
+  try {
+    assert.deepEqual(await catalog.refresh({ lineRoutes: snapshot.lineRoutes }), { changed: true });
+    const updated = catalog.get();
+    assert.deepEqual(updated.lines.at(-1), line);
+    assert.deepEqual(catalog.stop(stop.id), stop);
+    assert.deepEqual(updated.lineRoutes, { ...snapshot.lineRoutes, [line.id]: [] });
+    assert.throws(() => validateCatalog({
+      ...updated, lineRoutes: { ...updated.lineRoutes, [line.id]: [999] },
+    }), /Missing route coverage/);
+
+    const getRoute = api.getMapRoute;
+    const shape = { locations: [stop.location, snapshot.stops[0].location] };
+    api.getMapRoute = (id) => id === 999 ? shape : getRoute(id);
+    assert.deepEqual(await catalog.refresh({ lineRoutes: { [line.id]: [999] } }), { changed: true });
+    assert.deepEqual(catalog.get().lineRoutes[line.id], [999]);
+    assert.deepEqual(catalog.get().routes[999], shape);
+  } finally { catalog.close(); }
+});
+
 test('day-dependent line subset retains validated line and stop coverage, but incomplete stop data is rejected', async () => {
   const api = fakeApi();
   const absent = snapshot.lines.at(-1);

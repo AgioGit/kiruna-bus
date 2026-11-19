@@ -29,7 +29,8 @@ export function validateCatalog(catalog) {
   }
   for (const line of catalog.lines) {
     const ids = catalog.lineRoutes[line.id];
-    if (!ids?.length || ids.some((id) => !catalog.routes[id])) throw new Error(`Missing route coverage for line ${line.id}`);
+    // Stops and line metadata can exist before an upcoming call exposes a route ID.
+    if (!ids || ids.some((id) => !Object.hasOwn(catalog.routes, id))) throw new Error(`Missing route coverage for line ${line.id}`);
   }
   for (const id of Object.keys(catalog.lineRoutes)) {
     if (!lines.has(Number(id))) throw new Error('Catalog references an unknown line');

@@ -9,8 +9,8 @@ export function isCatalog(value) {
     || !Array.isArray(value.lines) || !value.lines.length || !Array.isArray(value.stops) || !value.stops.length
     || !value.lineRoutes || !value.routes || typeof value.routes !== 'object') return false;
   if (!value.lines.every((line) => Number.isSafeInteger(line.id) && line.id > 0 && typeof line.text === 'string'
-    && Array.isArray(value.lineRoutes[line.id]) && value.lineRoutes[line.id].length
-    && value.lineRoutes[line.id].every((id) => Number.isSafeInteger(id) && value.routes[id]))) return false;
+    && Array.isArray(value.lineRoutes[line.id])
+    && value.lineRoutes[line.id].every((id) => Number.isSafeInteger(id) && id > 0 && Object.hasOwn(value.routes, id)))) return false;
   if (!value.stops.every((stop) => Number.isSafeInteger(stop.id) && stop.id > 0 && typeof stop.text === 'string' && finitePoint(stop.location))) return false;
   return Object.values(value.routes).every((route) => Array.isArray(route.locations)
     && route.locations.length >= 2 && route.locations.every(finitePoint));

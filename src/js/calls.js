@@ -1,5 +1,6 @@
 import { api } from './api.js';
 import { store } from './appState.js';
+import { addActiveLineIds } from './filters.js';
 import { recordRouteIdsFromCalls } from './routes.js';
 import { CLOCK_SAMPLE_MAX_AGE, now, subscribeClock, synchronizeClock } from './clock.js';
 import { advanceDepartureHistory, effectiveDepartureTime, isPreviousDeparture, observeCalls } from './departure-history.js';
@@ -71,10 +72,10 @@ export async function fetchCallsForSelectedStop({ signal, isCurrent = () => true
   const state = store.get();
   const knownLines = new Set(state.lines.map((line) => line.id));
   const newLines = [];
-  for (const item of [history.previous, ...history.pending]) {
-    if (!isPreviousDeparture(item)) continue;
-    const { lineId, line } = item.call;
-    if (!Number.isSafeInteger(lineId) || lineId < 1 || !line.trim() || knownLines.has(lineId)) continue;
+  for (const call of [...flat, history.previous?.call, ...history.pending.map((item) => item.call)]) {
+    if (!call) continue;
+    const { lineId, line } = call;
+    if (!Number.isSafeInteger(lineId) || lineId < 1 || typeof line !== 'string' || !line.trim() || knownLines.has(lineId)) continue;
     knownLines.add(lineId);
     newLines.push({ id: lineId, text: line });
   }
@@ -82,7 +83,7 @@ export async function fetchCallsForSelectedStop({ signal, isCurrent = () => true
   store.set({
     ...(newLines.length ? {
       lines: [...state.lines, ...newLines],
-      activeLineIds: new Set([...state.activeLineIds, ...newLines.map((line) => line.id)]),
+      activeLineIds: addActiveLineIds(state.activeLineIds, newLines),
     } : {}),
     calls: flat,
     previousDeparture: history.previous,

@@ -28,6 +28,10 @@ at the server boundary. There is no application build step or database.
   parallel lanes with a 1 px gap, returning to the road center where they
   split; nearby bus markers follow their line's lane. Unshared stretches
   and buses far from their route retain their original positions.
+- Tåg (blue), Flyg (teal), and Tom (empty runs) are off by default. When
+  enabled, Tåg and Flyg use dashed provider geometry to show that their
+  routes are approximate; their markers stay at the reported GPS positions.
+  Their stops can still appear on the map and in search without a known route.
 - The API's LKAB-bound red route currently misses Skrädaregatan; only its
   Adolf Hedinsvägen–LKAB map segment uses the reverse of the API's return
   route. Stop times and the rest of the route are unchanged.
@@ -51,10 +55,12 @@ at the server boundary. There is no application build step or database.
   three seconds while the highlight remains. Click a bus marker to select it
   too, or select it again to clear it. The selected card previews its next
   three stops and offers the rest on demand, with expected times and delays.
-  Hovering or selecting a bus draws an animated dotted path along its rendered
-  route lane, including shared-road offsets and junction tapers, to its
-  next three upcoming stops when available (direct connections until route
-  geometry loads).
+  Selecting a bus draws an animated dotted path to the last reported
+  stop of its trip; hovering without selecting previews only the next
+  three stops. The path follows the rendered route lane, including
+  shared-road offsets and junction tapers, with direct connections until
+  route geometry loads. Tåg and Flyg do not show this path because their
+  route geometry is approximate.
   The dots render above route lines but below stop markers.
   The dots stop moving when reduced motion is requested.
 - All bus stops shown as clickable circles; selecting one displays its
@@ -63,7 +69,8 @@ at the server boundary. There is no application build step or database.
   grayed out after passing, explicitly unconfirmed; it does not mean a bus ran.
   History is in memory only and may be absent.
 - Save favorite stops locally for one-tap arrivals, or ask for nearby stops
-  using browser location permission.
+  using browser location permission. Line filter choices and favorite stops
+  are remembered in browser local storage, not cookies.
 - In this map-first layout experiment, Lines and Find a stop are expandable
   buttons on the map. Only one panel opens at a time; close it with its
   button, the close control, Escape, or a click outside. The Lines button

@@ -208,6 +208,42 @@ test('first visit renders cached lines, stops and route shapes while Boreal is u
   await expect.poll(() => page.locator('#map .leaflet-stops-pane path').count()).toBe(catalog.stops.length);
 });
 
+test('special lines are opt-in and line choices and saved stops survive reload together', async ({ page }) => {
+  const value = structuredClone(catalog);
+  const regular = value.lines[0].id;
+  const [train, airport, emptyRun] = [110000001, 110000552, 110000900];
+  const routeId = value.lineRoutes[regular][0];
+  value.version = 'special-lines';
+  value.lines.push({ id: train, text: 'Tåg.' }, { id: airport, text: 'Flyg.' }, { id: emptyRun, text: 'Tom.' });
+  Object.assign(value.lineRoutes, { [train]: [], [airport]: [routeId], [emptyRun]: [] });
+  await page.route('**/api/v1/bootstrap', (route) => route.fulfill({
+    json: { catalog: value, source: 'bundled', serverTime: new Date().toISOString() },
+  }));
+  await page.goto('/');
+  await page.locator('#map-lines-toggle').click();
+  const checkbox = (id) => page.locator(`#line-filters input[data-line-id="${id}"]`);
+  const approximateRoute = page.locator('#map .leaflet-routes-pane path[stroke-dasharray="6 6"]');
+  for (const id of [train, airport, emptyRun]) await expect(checkbox(id)).not.toBeChecked();
+  await expect(checkbox(regular)).toBeChecked();
+  await expect(approximateRoute).toHaveCount(0);
+  await checkbox(regular).uncheck();
+  await checkbox(airport).check();
+  await expect(approximateRoute).toHaveAttribute('stroke', '#00796b');
+
+  await page.evaluate(async (stop) => (await import('/js/stops.js')).selectStopArea(stop), value.stops[0]);
+  await page.getByRole('button', { name: /^Save .+ for quick access$/ }).click();
+  await page.reload();
+  await page.locator('#map-lines-toggle').click();
+  await expect(checkbox(airport)).toBeChecked();
+  await expect(checkbox(regular)).not.toBeChecked();
+  for (const id of [train, emptyRun]) await expect(checkbox(id)).not.toBeChecked();
+  await expect(approximateRoute).toHaveCount(1);
+  await page.locator('#map-stops-toggle').click();
+  await expect(page.locator('.favorite-stop-select')).toBeVisible();
+  await page.locator('#information-toggle').click();
+  await expect(page.locator('#app-information')).toContainText('local storage, not in cookies');
+});
+
 test('newer browser catalog survives reload when bootstrap cannot be reached', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#line-filters input')).toHaveCount(catalog.lines.length);

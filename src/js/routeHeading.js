@@ -54,7 +54,7 @@ export function pathToNextStop(position, geometry, nextStopLocation) {
 }
 
 export function pathToUpcomingStops(position, geometry, stopLocations) {
-  const stops = stopLocations.slice(0, 3).filter((stop) => stop?.lat != null && stop?.lon != null);
+  const stops = stopLocations.filter((stop) => stop?.lat != null && stop?.lon != null);
   if (!stops.length || position?.lat == null || position?.lon == null) return null;
   const path = [];
   let from = position;

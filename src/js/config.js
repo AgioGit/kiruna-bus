@@ -1,5 +1,6 @@
 import { api, ApiError } from './api.js';
 import { store } from './appState.js';
+import { addActiveLineIds } from './filters.js';
 import { isCatalog, readCachedCatalog, writeCachedCatalog } from './catalog-cache.js';
 import { CLOCK_SAMPLE_MAX_AGE, synchronizeClock } from './clock.js';
 import { clearSelectedStop } from './stops.js';
@@ -22,7 +23,7 @@ export function applyCatalog(catalog, source) {
   const state = store.get();
   const knownLines = new Set(state.lines.map((line) => line.id));
   const lines = [...catalog.lines, ...state.lines.filter((line) => !catalog.lines.some((item) => item.id === line.id))];
-  const activeLineIds = new Set(lines.filter((line) => !knownLines.has(line.id) || state.activeLineIds.has(line.id)).map((line) => line.id));
+  const activeLineIds = addActiveLineIds(state.activeLineIds, lines.filter((line) => !knownLines.has(line.id)));
   const lineRoutes = new Map([...state.lineRoutes].map(([id, ids]) => [id, new Set(ids)]));
   for (const [id, routes] of Object.entries(catalog.lineRoutes)) {
     const ids = lineRoutes.get(Number(id)) ?? new Set();

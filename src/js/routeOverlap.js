@@ -13,6 +13,7 @@ function edgeKey(from, to) {
 export function routePartsForVisibleRoutes(routes) {
   const colorsByEdge = new Map();
   for (const route of routes) {
+    if (route.approximate) continue;
     const locations = route.geometry.locations;
     for (let i = 1; i < locations.length; i++) {
       const key = edgeKey(locations[i - 1], locations[i]);
@@ -47,7 +48,7 @@ export function routePartsForVisibleRoutes(routes) {
     };
 
     for (let i = 1; i < locations.length; i++) {
-      const colors = sharedEdges.get(edgeKey(locations[i - 1], locations[i]));
+      const colors = route.approximate ? null : sharedEdges.get(edgeKey(locations[i - 1], locations[i]));
       const phase = colors?.indexOf(route.color) ?? -1;
       const key = colors ? `${colors.join(',')}:${phase}` : 'solid';
       labels.push(key);

@@ -2,6 +2,7 @@ import { getConfig } from './config.js';
 import { store } from './appState.js';
 import { selectStopsNearLocation, selectStopArea } from './stops.js';
 import { colorForLineId } from './lineColors.js';
+import { isApproximateLine } from './lineProperties.js';
 import { headingAlongRoute, pathToUpcomingStops } from './routeHeading.js';
 import { routePartsForVisibleRoutes } from './routeOverlap.js';
 import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from './routeOffset.js';
@@ -221,7 +222,7 @@ function renderRoutes(state, selectedRouteId) {
       const status = routeServiceStatus(state.serviceView, lineId, routeId);
       if (status === 'inactive') continue;
       visible.add(key);
-      routes.push({ key, routeId, geometry, color: colorForLineId(lineId), status });
+      routes.push({ key, routeId, geometry, color: colorForLineId(lineId), status, approximate: isApproximateLine(lineId) });
     }
   }
   for (const route of routePartsForVisibleRoutes(routes)) {
@@ -230,6 +231,7 @@ function renderRoutes(state, selectedRouteId) {
     const styleFor = () => ({
       pane: ROUTE_PANE,
       color,
+      dashArray: route.approximate ? '6 6' : undefined,
       weight: selected ? 7 : ROUTE_WEIGHT,
       opacity: status === 'unknown' ? 0.3 : selected ? 1 : 0.8,
     });
@@ -296,8 +298,9 @@ function renderVehicles(state) {
       : `call:${bus.callIds[0] ?? bus.key}`;
     seen.add(key);
     const { lat, lon } = bus.position.location;
+    const approximate = isApproximateLine(bus.lineId);
     const routeEntry = routePolylines.get(`${bus.lineId}:${bus.routeId}`);
-    const displayPosition = routeEntry?.visible
+    const displayPosition = !approximate && routeEntry?.visible
       ? markerPositionOnRoute(bus.position.location, routeEntry.parts, routeEntry.renderedPaths, map) ?? [lat, lon]
       : [lat, lon];
     const color = bus.lineId !== undefined ? colorForLineId(bus.lineId) : '#888888';
@@ -306,7 +309,7 @@ function renderVehicles(state) {
     const nextStopLocation = locationForStopText(state, bus.nextStop?.stopText);
     const heading = reportedHeading != null && Number.isFinite(Number(reportedHeading))
       ? Number(reportedHeading)
-      : headingAlongRoute(bus.position.location, state.routeGeometry.get(bus.routeId), nextStopLocation);
+      : approximate ? null : headingAlongRoute(bus.position.location, state.routeGeometry.get(bus.routeId), nextStopLocation);
 
     const markerClasses = ['vehicle-marker'];
     if (bus.stale) markerClasses.push('vehicle-marker--stale');
@@ -314,12 +317,13 @@ function renderVehicles(state) {
     if (isSelected) wrapperClasses.push('vehicle-icon-wrapper--selected');
     const isHovered = bus.journeyId != null && bus.journeyId === state.hoveredVehicleJourneyId;
     if (isHovered) wrapperClasses.push('vehicle-icon-wrapper--hover');
-    if (isSelected || isHovered) {
+    if (!approximate && (isSelected || isHovered)) {
       const upcoming = bus.upcomingStops ?? state.journeyStops.get(bus.journeyId) ?? [bus.nextStop, bus.followingStop];
+      const previewStops = isSelected ? upcoming : upcoming.slice(0, 3);
       const path = pathToUpcomingStops(
         { lat: displayPosition[0], lon: displayPosition[1] },
         routeEntry?.visible ? { locations: routeEntry.renderedLocations } : state.routeGeometry.get(bus.routeId),
-        upcoming.map((stop) => locationForStopText(state, stop?.stopText))
+        previewStops.map((stop) => locationForStopText(state, stop?.stopText))
       );
       if (path) {
         projected.add(key);

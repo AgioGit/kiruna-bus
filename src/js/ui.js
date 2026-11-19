@@ -1,5 +1,6 @@
 import { store } from './appState.js';
 import { toggleLine } from './filters.js';
+import { isApproximateLine } from './lineProperties.js';
 import { searchStops, selectStopByText, clearSelectedStop, cancelStopSearch } from './stops.js';
 import { formatTime, minutesUntil, now } from './clock.js';
 import { effectiveDepartureTime } from './departure-history.js';
@@ -289,7 +290,8 @@ function renderLineFilters(state) {
   const html = state.lines
     .map((line) => {
       const checked = state.activeLineIds.has(line.id) ? 'checked' : '';
-      return `<label class="line-filter"><input type="checkbox" data-line-id="${line.id}" ${checked}> ${escapeHtml(line.text)}</label>`;
+      const geometryHint = isApproximateLine(line.id) ? ' (approximate route)' : '';
+      return `<label class="line-filter"><input type="checkbox" data-line-id="${line.id}" ${checked}> ${escapeHtml(line.text)}${geometryHint}</label>`;
     })
     .join('');
 

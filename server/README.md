@@ -310,9 +310,10 @@ npm run snapshot -- --accept-removals
 ```
 
 Generation uses bounded live requests, retains accepted route associations when
-there are no current journeys, and validates all required line/stop/shape
-coverage and correction anchors before atomic replacement. Failure leaves the
-accepted file intact. First generation needs active calls to discover routes;
+there are no current journeys, and validates line and stop data, referenced
+shapes, and correction anchors before atomic replacement. A line with no
+observed route ID is still included with its stops and an empty route list.
+Failure leaves the accepted file intact. Active calls expose new route IDs;
 later generations can reuse the previous route catalog. Review the snapshot
 diff, provenance, and capture time before releasing it. Do not hand-edit data to
 pretend a partial capture is complete.

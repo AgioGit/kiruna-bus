@@ -268,8 +268,14 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
     stopLocations: new Map([...store.get().stopLocations, ...following.map((stop) => [stop.id, stop])]),
     journeyStops: new Map([[7, [bus.nextStop, ...following.map((stop) => ({ stopText: stop.text }))]]]),
   });
-  assert.deepEqual(projections.at(-1).position.at(-1), [following[1].location.lat, following[1].location.lon]);
+  const fullProjection = projections.at(-1);
+  assert.deepEqual(fullProjection.position.at(-1), [following[2].location.lat, following[2].location.lon]);
   assertProjectionOnLane(routes.at(-1));
+  store.set({ selectedVehicleJourneyId: null, hoveredVehicleJourneyId: 7 });
+  assert.equal(projections.at(-1), fullProjection);
+  assert.deepEqual(fullProjection.position.at(-1), [following[1].location.lat, following[1].location.lon]);
+  store.set({ selectedVehicleJourneyId: 7 });
+  assert.deepEqual(fullProjection.position.at(-1), [following[2].location.lat, following[2].location.lon]);
   store.set({ journeyStops: new Map([[7, [bus.nextStop, { stopText: following[0].text }]]]) });
   assert.deepEqual(projections.at(-1).position.at(-1), [following[0].location.lat, following[0].location.lon]);
   const lastProjection = projections.at(-1);
@@ -287,4 +293,25 @@ test('moves existing bus markers without rebuilding unchanged routes and stops',
   assert.equal(store.get().activeLineIds, choicesBefore);
   store.set({ serviceView: { complete: false, active: new Set() } });
   assert.equal(sharedPaths[1].options.opacity, 0.3);
+
+  const airportLine = 110000552;
+  const airportBus = { ...bus, lineId: airportLine, routeId: 999, position: { ...bus.position, location: overlapGps, heading: null } };
+  const projectionCount = projections.length;
+  store.set({
+    activeLineIds: new Set([123, airportLine]),
+    lineRoutes: new Map([[123, new Set([456])], [airportLine, new Set([999])]]),
+    liveVehicles: [airportBus],
+  });
+  const airportRoute = routes.findLast((route) => route.options.dashArray === '6 6');
+  const yellowRoute = routes.findLast((route) => route.options.color === '#f9a825');
+  assert.equal(airportRoute.options.color, '#00796b');
+  assert.deepEqual(airportRoute.position[0], [...sharedLocations].reverse().map(({ lat, lon }) => [lat, lon]));
+  assert.deepEqual(yellowRoute.position[0], sharedLocations.map(({ lat, lon }) => [lat, lon]));
+  const airportMarker = markers.at(-1);
+  assert.deepEqual(airportMarker.position, [overlapGps.lat, overlapGps.lon]);
+  assert.doesNotMatch(airportMarker.icon.html, /vehicle-heading/);
+  store.set({ selectedVehicleJourneyId: airportBus.journeyId });
+  assert.equal(projections.length, projectionCount);
+  store.set({ liveVehicles: [{ ...airportBus, position: { ...airportBus.position, heading: 90 } }] });
+  assert.match(airportMarker.icon.html, /vehicle-heading/);
 });

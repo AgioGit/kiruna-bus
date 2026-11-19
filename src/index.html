@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kiruna Live Bus Tracker</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
   <link rel="stylesheet" href="css/app.css" />
   <link rel="stylesheet" href="css/trip.css" />
+  <link rel="stylesheet" href="css/saved-stop-board.css" />
   <link rel="icon" href="data:," />
   <script>
     (function () {
@@ -23,21 +23,25 @@
 <body>
   <header class="app-header">
     <div class="header-title">
-      <h1>Kiruna buses</h1>
-      <button id="information-toggle" class="information-toggle" type="button" aria-label="About this page" aria-expanded="false" aria-controls="app-information">
+      <h1 data-i18n="appHeading">Kiruna buses</h1>
+      <button id="information-toggle" class="information-toggle" type="button" aria-label="About this page" data-i18n-aria-label="about" aria-expanded="false" aria-controls="app-information">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v2"/></svg>
       </button>
       <button id="theme-toggle" class="theme-toggle" type="button">Dark</button>
+      <div id="language-switch" class="language-switch" role="group" aria-label="Language" data-i18n-aria-label="language">
+        <button type="button" data-locale="sv" lang="sv" aria-pressed="false">Svenska</button>
+        <button type="button" data-locale="en" lang="en" aria-pressed="true">English</button>
+      </div>
     </div>
     <section id="app-information" class="header-information" aria-labelledby="information-heading" hidden>
-      <h2 id="information-heading">About this page</h2>
-      <p>All data is based on the data available through the real-time information page. Source: <a href="https://lokaltrafikenkiruna.se/realtidsinformation/" target="_blank" rel="noopener noreferrer">Lokaltrafiken Kiruna</a>.</p>
-      <p>This page is not affiliated with either Kiruna Kommun or Boreal. It is provided as is, primarily for educational purposes. Data may be delayed or inaccurate.</p>
-      <p>Tåg (station shuttle), Flyg (airport shuttle) and Tom (empty runs) are off by default. Dashed Tåg and Flyg routes are approximate and may not follow roads.</p>
-      <p>Line filter choices and saved stops are kept in this browser’s local storage, not in cookies or on our server. The choices apply only in this browser. Clear this site’s data in your browser settings to reset them.</p>
+      <h2 id="information-heading" data-i18n="about">About this page</h2>
+      <p><span data-i18n="aboutSource">All data is based on the data available through the real-time information page. Source:</span> <a href="https://lokaltrafikenkiruna.se/realtidsinformation/" target="_blank" rel="noopener noreferrer">Lokaltrafiken Kiruna</a>.</p>
+      <p data-i18n="aboutDisclaimer">This page is not affiliated with either Kiruna Kommun or Boreal. It is provided as is, primarily for educational purposes. Data may be delayed or inaccurate.</p>
+      <p data-i18n="aboutRoutes">Tåg (station shuttle), Flyg (airport shuttle) and Tom (empty runs) are off by default. Dashed Tåg and Flyg routes are approximate and may not follow roads.</p>
+      <p data-i18n="aboutStorage">Language, line filter choices and saved stops are kept in this browser’s local storage, not in cookies or on our server. The choices apply only in this browser. Clear this site’s data in your browser settings to reset them.</p>
       <div class="header-updates">
         <span id="refresh-countdown" class="refresh-countdown" role="timer" aria-live="off"></span>
-        <div class="header-notices" role="group" aria-label="Update notices (scroll for more)" tabindex="0">
+        <div class="header-notices" role="group" aria-label="Update notices (scroll for more)" data-i18n-aria-label="updateNotices" tabindex="0">
           <span id="app-error" class="header-notice" role="alert" hidden></span>
           <span id="status-banner" class="header-notice" role="status" aria-live="polite" hidden></span>
         </div>
@@ -46,66 +50,66 @@
   </header>
 
   <main class="app-layout">
-    <section class="map-panel" aria-label="Live bus map">
+    <section class="map-panel" aria-label="Live bus map" data-i18n-aria-label="mapLabel">
       <div id="map"></div>
       <div id="map-controls" class="map-controls">
-        <div class="map-toolbar" role="group" aria-label="Map tools">
+        <div class="map-toolbar" role="group" aria-label="Map tools" data-i18n-aria-label="mapTools">
           <button id="map-lines-toggle" class="map-tool-button" type="button" aria-expanded="false" aria-controls="map-lines-panel">
-            Lines <span id="lines-button-summary" class="map-tool-count"></span>
+            <span data-i18n="lines">Lines</span> <span id="lines-button-summary" class="map-tool-count"></span>
           </button>
-          <button id="map-stops-toggle" class="map-tool-button" type="button" aria-expanded="false" aria-controls="map-stops-panel">
+          <button id="map-stops-toggle" class="map-tool-button" type="button" aria-expanded="false" aria-controls="map-stops-panel" data-i18n="findStop">
             Find a stop
           </button>
         </div>
         <section id="map-lines-panel" class="map-tool-panel" aria-labelledby="lines-heading" hidden>
           <div class="map-tool-heading">
-            <h2 id="lines-heading">Lines</h2>
-            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close line filters">&times;</button>
+            <h2 id="lines-heading" data-i18n="lines">Lines</h2>
+            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close line filters" data-i18n-aria-label="closeLines">&times;</button>
           </div>
           <p id="lines-summary" class="hint">Loading lines</p>
           <div id="line-filters" class="line-filters"></div>
         </section>
         <section id="map-stops-panel" class="map-tool-panel" aria-labelledby="stop-heading" hidden>
           <div class="map-tool-heading">
-            <h2 id="stop-heading">Find a stop</h2>
-            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close stop finder">&times;</button>
+            <h2 id="stop-heading" data-i18n="findStop">Find a stop</h2>
+            <button class="map-tool-close" type="button" data-close-map-panel aria-label="Close stop finder" data-i18n-aria-label="closeFinder">&times;</button>
           </div>
-          <label class="visually-hidden" for="stop-search">Search for a bus stop</label>
+          <label class="visually-hidden" for="stop-search" data-i18n="searchStop">Search for a bus stop</label>
           <div class="stop-search-wrap">
             <div class="stop-search">
-              <input id="stop-search" type="text" placeholder="Stop name or number" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="stop-search-results" aria-expanded="false" />
+              <input id="stop-search" type="text" placeholder="Stop name or number" data-i18n-placeholder="searchPlaceholder" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="stop-search-results" aria-expanded="false" />
             </div>
             <ul id="stop-search-results" class="stop-search-results" role="listbox"></ul>
           </div>
-          <button id="nearby-stops-button" type="button" class="nearby-stops-button" aria-label="Find stops near me">
+          <button id="nearby-stops-button" type="button" class="nearby-stops-button" aria-label="Find stops near me" data-i18n-aria-label="nearMeLabel">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="6"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
-            Near me
+            <span data-i18n="nearMe">Near me</span>
           </button>
           <p id="nearby-stops-status" class="hint" role="status" aria-live="polite" hidden></p>
           <ul id="nearby-stops-list" class="nearby-stops-list"></ul>
           <div id="saved-stops" class="commuter-favorites">
-            <h3 class="commuter-subheading">Saved stops</h3>
+            <h3 class="commuter-subheading" data-i18n="savedStops">Saved stops</h3>
             <ul id="favorite-stops-list" class="favorite-stops-list"></ul>
-            <p id="favorite-stops-empty" class="hint">Save a selected stop from its departures panel for quick access next time.</p>
+            <p id="favorite-stops-empty" class="hint" data-i18n="savedEmpty">Save a stop from its departures panel to see its next departures on the saved stops board.</p>
             <p id="favorites-status" class="hint" role="status" aria-live="polite" hidden></p>
           </div>
         </section>
       </div>
-      <span class="map-instruction">Tap a stop to see departures</span>
+      <span class="map-instruction" data-i18n="mapHint">Tap a stop to see departures</span>
     </section>
 
     <aside class="side-panel">
       <section id="traffic-info" class="traffic-info-panel" aria-labelledby="traffic-info-heading">
-        <h2 id="traffic-info-heading">Traffic information</h2>
-        <div id="traffic-info-content" role="status" aria-live="polite">Loading traffic information…</div>
+        <h2 id="traffic-info-heading" data-i18n="traffic">Traffic information</h2>
+        <div id="traffic-info-content" role="status" aria-live="polite"><span data-i18n="loadingTraffic">Loading traffic information…</span></div>
       </section>
-      <section id="arrivals" class="arrivals-panel" aria-label="Stop departures" hidden>
+      <section id="arrivals" class="arrivals-panel" aria-label="Stop departures" data-i18n-aria-label="stopDepartures" hidden>
         <div class="departure-heading">
           <div>
-            <p class="section-kicker">Departures from</p>
-            <h2 id="arrivals-stop-name"></h2>
+            <p class="section-kicker" data-i18n="departuresFrom">Departures from</p>
+            <h2 id="arrivals-stop-name" tabindex="-1"></h2>
           </div>
-          <button id="stop-clear" class="stop-clear" type="button">Clear</button>
+          <button id="stop-clear" class="stop-clear" type="button" data-i18n="clear">Clear</button>
         </div>
         <div id="arrivals-content"></div>
         <div class="departure-actions">
@@ -113,24 +117,23 @@
         </div>
       </section>
 
-      <section id="live-buses" class="live-buses-panel" aria-label="Live buses"></section>
+      <section id="live-buses" class="live-buses-panel" aria-label="Live buses" data-i18n-aria-label="liveBuses"></section>
     </aside>
   </main>
 
   <details id="upstream-debug" class="upstream-debug" hidden open>
-    <summary>Local upstream debug</summary>
+    <summary data-i18n="debugTitle">Local upstream debug</summary>
     <div class="debug-controls">
-      <label for="debug-call-filter">Call</label>
-      <select id="debug-call-filter"><option value="">All calls</option></select>
+      <label for="debug-call-filter" data-i18n="debugCall">Call</label>
+      <select id="debug-call-filter"><option value="" data-i18n="debugAll">All calls</option></select>
       <button id="debug-pause" type="button" aria-pressed="false">Pause updates</button>
     </div>
     <p id="debug-status" class="hint" role="status"></p>
     <p id="debug-error" class="traffic-info-warning" role="alert" hidden></p>
-    <label class="visually-hidden" for="debug-json">Upstream request and response pairs as JSON</label>
+    <label class="visually-hidden" for="debug-json" data-i18n="debugJson">Upstream request and response pairs as JSON</label>
     <textarea id="debug-json" readonly spellcheck="false" wrap="off"></textarea>
   </details>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

@@ -302,6 +302,8 @@
         "calls": { "type": "array", "items": { "$ref": "#/definitions/call" } },
         "messages": { "type": "array", "items": { "$ref": "#/definitions/departureMessage" } }, "isStopCancelled": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }, "state": { "enum": ["fresh", "stale", "unavailable"] },
+        "freshForMs": { "type": "number", "minimum": 0 },
+        "expiresInMs": { "type": "number", "minimum": 0 },
         "previousDeparture": { "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/departureObservation" }] },
         "pendingDepartures": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/departureObservation" } }
       }

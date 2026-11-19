@@ -149,7 +149,7 @@ Selected-stop departures are read immediately and after new dynamic
 publications, using the collector's complete per-stop response cache rather
 than starting another upstream call. Cancellation and disruption messages are
 preserved. Failed refreshes label retained departures stale, and departure
-responses and browser display expire after three minutes. The collector also
+responses and browser display expire after two minutes. The collector also
 keeps at most one latest passed observation per stop and up to 64 pending
 observations within 24 hours, within the same 16 MiB budget (live data takes
 priority). These are in memory only, may be absent after a restart or under
@@ -178,7 +178,7 @@ It references the same [schemas.json](schemas.json) used by the server.
 | `GET /api/v1/buses` | Cached vehicles, route associations, timestamped service evidence, observed line labels, quality, epoch/revision, and catalog version. Registers activity but never waits for collection. |
 | `GET /api/v1/stream` | Full `buses` SSE events and explicit `tracking-status` events; registers activity until disconnected. |
 | `GET /api/v1/stops` | Located stop catalog. |
-| `GET /api/v1/stops/:id/departures` | Flat departures, disruptions, cancellation state, `updatedAt`, `fresh`/`stale`/`unavailable` state, and optional previous observation. |
+| `GET /api/v1/stops/:id/departures` | Flat departures, disruptions, cancellation, `updatedAt`, state, relative `freshForMs`/`expiresInMs`, and optional history. `?mode=passive` does not activate or extend collection; the default is active. |
 | `GET /api/v1/routes/:id` | Corrected display-ready geometry. |
 | `GET /api/v1/search?q=...` | Up to 20 catalog stop strings matching a name or number. |
 | `GET /api/v1/resolve?q=...` | Exact stop string lookup, or `null`. |

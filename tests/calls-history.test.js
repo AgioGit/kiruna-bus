@@ -46,7 +46,7 @@ test('history discovers only safe line labels without selecting known lines or c
   }));
   t.mock.method(api, 'getMapRoute', async () => { throw new Error('History must not request routes'); });
   resetSelectedStopCalls();
-  store.set({ selectedStop: { id: 1 }, stopSelectionSeq: 3, calls: [], previousDeparture: null,
+  store.set({ selectedStop: { id: 3 }, stopSelectionSeq: 3, calls: [], previousDeparture: null,
     lines: [{ id: 1, text: 'Line 1' }], activeLineIds: new Set(), lineRoutes: new Map(),
     routeGeometry: new Map(), liveVehicles: [], serviceView: { active: new Set(), complete: false } });
   t.after(() => { resetSelectedStopCalls(); store.set({ selectedStop: null }); });

@@ -1,5 +1,7 @@
-import { api } from './api.js';
+import { api, errorMessage } from './api.js';
 import { failureDelay } from './poller.js';
+import { message, subscribeLocale, t } from './i18n.js';
+import { refreshNotice, showNotice } from './notices.js';
 
 const keyFor = (entry) => `${entry.provider}/${entry.call}`;
 
@@ -15,11 +17,19 @@ export function initUpstreamDebug() {
   let entries = [], dropped = 0, timer = null, controller = null, generation = 0, failures = 0, paused = false, disabled = false;
   let lastSnapshot = null, retryAt = 0;
 
+  function renderLabels() {
+    filter.options[0].textContent = t('debugAll');
+    const shown = filter.value ? entries.filter((entry) => keyFor(entry) === filter.value).length : entries.length;
+    status.textContent = t('debugStatus', shown, entries.length, dropped);
+    pause.textContent = t(paused ? 'debugResume' : 'debugPause');
+    refreshNotice(errorNotice);
+  }
+
   function render() {
     const selected = filter.value;
     const calls = [...new Set(entries.map(keyFor))];
     if (selected && !calls.includes(selected)) calls.push(selected);
-    filter.replaceChildren(new Option('All calls', ''), ...calls.sort().map((key) => new Option(key, key)));
+    filter.replaceChildren(new Option(t('debugAll'), ''), ...calls.sort().map((key) => new Option(key, key)));
     filter.value = selected;
     const matches = selected ? entries.filter((entry) => keyFor(entry) === selected) : entries;
     const text = JSON.stringify(matches, null, 2);
@@ -29,7 +39,7 @@ export function initUpstreamDebug() {
       if (document.activeElement === output) output.setSelectionRange(selectionStart, selectionEnd);
       output.scrollTop = scrollTop;
     }
-    status.textContent = `${matches.length} of ${entries.length} pairs shown. ${dropped} older or oversized pairs discarded. Bodies above 64 KiB are truncated.`;
+    renderLabels();
   }
 
   function stop() {
@@ -62,15 +72,12 @@ export function initUpstreamDebug() {
         render();
       }
       failures = 0;
-      errorNotice.hidden = true;
-      errorNotice.textContent = '';
+      showNotice(errorNotice, '');
     } catch (error) {
       if (token !== generation) return;
-      errorNotice.hidden = false;
       disabled = error.status === 404 || error.status === 403;
-      errorNotice.textContent = disabled
-        ? 'Local debugging requires LOCAL_DEBUG=true and HOST=127.0.0.1 on a non-production server. Open this page on the same local origin.'
-        : `Could not update upstream debug capture: ${error.message}`;
+      const detail = error.message === 'Invalid upstream debug response.' ? message('debugInvalid') : errorMessage(error);
+      showNotice(errorNotice, disabled ? message('debugDisabled') : message('debugFailed', detail));
       wait = failureDelay(++failures, error.retryAfter);
       retryAt = Date.now() + wait;
     } finally {
@@ -83,13 +90,14 @@ export function initUpstreamDebug() {
   filter.addEventListener('change', render);
   pause.addEventListener('click', () => {
     paused = !paused;
-    pause.textContent = paused ? 'Resume updates' : 'Pause updates';
+    renderLabels();
     pause.setAttribute('aria-pressed', String(paused));
     stop();
     if (active()) void poll();
   });
   panel.addEventListener('toggle', () => { stop(); if (active()) void poll(); });
   document.addEventListener('visibilitychange', () => { stop(); if (active()) void poll(); });
+  subscribeLocale(renderLabels);
   render();
   void poll();
 }

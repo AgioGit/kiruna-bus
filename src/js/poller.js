@@ -1,6 +1,7 @@
 import { store } from './appState.js';
-import { apiBase } from './api.js';
+import { apiBase, errorMessage } from './api.js';
 import { fetchCallsForSelectedStop } from './calls.js';
+import { departureReadReadyAt } from './departure-reads.js';
 import { acceptBusesSnapshot, refreshLiveVehicles } from './live-vehicles.js';
 import { isValidTrackingStatus, classifyRevision, acceptRevision, getTrackingState } from './tracking.js';
 import { refreshStopLocations } from './stop-locations.js';
@@ -194,7 +195,7 @@ function maybeRefreshCatalog(data) {
     })
     .catch((error) => {
       if (!isCurrent()) return;
-      store.set({ errors: { ...store.get().errors, config: error.message } });
+      store.set({ errors: { ...store.get().errors, config: errorMessage(error) } });
       clearTimeout(basicRecoveryTimer);
       basicRecoveryTimer = setTimeout(() => maybeRefreshCatalog(data), WATCHDOG_MS);
       basicRecoveryTimer?.unref?.();
@@ -203,11 +204,23 @@ function maybeRefreshCatalog(data) {
   catalogRefreshPromise = pending;
 }
 
+const departureRevisionListeners = new Set();
+export function subscribeDepartureRevisions(listener) {
+  departureRevisionListeners.add(listener);
+  return () => departureRevisionListeners.delete(listener);
+}
+
+function refreshDepartures() {
+  maybeRefreshSelectedStop();
+  for (const listener of departureRevisionListeners) listener();
+}
+
 // A stop remains selected across dynamic cycles: refetch its departures
 // after a genuinely new revision (not a duplicate/stale one), so the server's
 // shared calls cache is re-read without piling up overlapping requests.
 function maybeRefreshSelectedStop() {
-  if (paused || !store.get().selectedStop || callsAbort) return;
+  const stop = store.get().selectedStop;
+  if (paused || !stop || callsAbort || departureReadReadyAt(stop.id) > performance.now()) return;
   clearTimeout(callsTimer);
   void fetchCallsOnce(callsGeneration);
 }
@@ -230,7 +243,7 @@ function afterSnapshot(data, outcome) {
   deliveries++;
   liveFailures = 0;
   maybeRefreshCatalog(data);
-  if (outcome !== 'duplicate') maybeRefreshSelectedStop();
+  if (outcome !== 'duplicate') refreshDepartures();
   return outcome;
 }
 
@@ -245,10 +258,10 @@ function handleTrackingStatusPayload(data) {
   deliveries++;
   store.set({
     liveQuality: data.quality ?? { state: 'unavailable', reasons: [] },
-    errors: { ...store.get().errors, vehicles: data.error?.message ?? null },
+    errors: { ...store.get().errors, vehicles: errorMessage(data.error) ?? null },
   });
   maybeRefreshCatalog(data);
-  if (outcome !== 'duplicate') maybeRefreshSelectedStop();
+  if (outcome !== 'duplicate') refreshDepartures();
   return outcome;
 }
 
@@ -296,7 +309,7 @@ async function onWatchdogFired(token) {
       const wait = failureDelay(++liveFailures, error.retryAfter);
       store.set({
         liveQuality: { ...(store.get().liveQuality ?? {}), state: 'unavailable' },
-        errors: { ...store.get().errors, vehicles: error.message },
+        errors: { ...store.get().errors, vehicles: errorMessage(error) },
       });
       nextFallbackAt = Date.now() + wait;
       clearWatchdog();
@@ -340,7 +353,7 @@ async function runFallbackCycle(token) {
       wait = failureDelay(++liveFailures, error.retryAfter);
       store.set({
         liveQuality: { ...(store.get().liveQuality ?? {}), state: 'unavailable' },
-        errors: { ...store.get().errors, vehicles: error.message },
+        errors: { ...store.get().errors, vehicles: errorMessage(error) },
       });
     }
   } finally {
@@ -408,14 +421,23 @@ async function fetchCallsOnce(token) {
   } catch (error) {
     if (isCurrent() && error.name !== 'AbortError') {
       const wait = failureDelay(++callsFailures, error.retryAfter);
-      store.set({ isCallsLoading: false, errors: { ...store.get().errors, calls: error.message } });
+      store.set({ isCallsLoading: false, errors: { ...store.get().errors, calls: errorMessage(error) } });
       clearTimeout(callsTimer);
-      callsTimer = setTimeout(() => fetchCallsOnce(token), wait);
-      callsTimer?.unref?.();
+      if (callsFailures <= 2) scheduleCallsRetry(token, wait);
     }
   } finally {
     if (callsAbort === controller) callsAbort = null;
   }
+}
+
+function scheduleCallsRetry(token, wait) {
+  const remaining = departureReadReadyAt(store.get().selectedStop?.id) - performance.now();
+  callsTimer = setTimeout(() => {
+    if (paused || token !== callsGeneration || !store.get().selectedStop) return;
+    if (departureReadReadyAt(store.get().selectedStop.id) > performance.now()) scheduleCallsRetry(token, 0);
+    else void fetchCallsOnce(token);
+  }, Math.min(2147483647, Math.max(wait, remaining)));
+  callsTimer?.unref?.();
 }
 
 export function onStopSelected() {
@@ -430,7 +452,8 @@ export function onStopDeselected() {
   callsGeneration++;
   clearTimeout(callsTimer);
   callsAbort?.abort();
-  store.set({ calls: [], isStopCancelled: false, messages: [], isCallsLoading: false, departuresUpdatedAt: null });
+  store.set({ calls: [], isStopCancelled: false, messages: [], isCallsLoading: false,
+    departuresUpdatedAt: null, departuresRetained: false });
 }
 
 export function pausePolling() {
@@ -476,7 +499,7 @@ export function resumePolling() {
   const basicSignal = lifecycleAbort.signal;
   const basicCurrent = () => !paused && !basicSignal.aborted;
   void refreshStopLocations({ signal: basicSignal, isCurrent: basicCurrent }).catch((error) => {
-    if (basicCurrent()) store.set({ errors: { ...store.get().errors, stops: error.message } });
+    if (basicCurrent()) store.set({ errors: { ...store.get().errors, stops: errorMessage(error) } });
   });
   maybeRefreshCatalog({});
   if (typeof EventSource !== 'function') {
@@ -508,7 +531,7 @@ export function resumePolling() {
     if (isCurrent() && error.name !== 'AbortError' && deliveries === startedAtDelivery) {
       store.set({
         liveQuality: { ...(store.get().liveQuality ?? {}), state: 'unavailable' },
-        errors: { ...store.get().errors, vehicles: error.message },
+        errors: { ...store.get().errors, vehicles: errorMessage(error) },
       });
     }
   }).finally(() => {

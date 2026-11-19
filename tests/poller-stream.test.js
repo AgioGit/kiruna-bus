@@ -222,7 +222,7 @@ test('a catalogVersion change triggers exactly one coalesced bootstrap refresh, 
   assert.equal(store.get().catalogInfo.version, 'cv-2');
 });
 
-test('selected-stop departures refetch once after a genuinely new revision, not on duplicate/stale snapshots', async (t) => {
+test('selected-stop departures coalesce close revisions, never refetching for duplicate or stale snapshots', async (t) => {
   t.mock.method(api, 'getBuses', async () => busesSnapshot({ revision: 0 }));
   const fetchCalls = t.mock.method(api, 'getCalls', async () => ({ calls: [], isStopCancelled: false, messages: [], updatedAt: new Date().toISOString(), serverTime: new Date().toISOString() }));
   store.set({ selectedStop: { id: 42 }, stopSelectionSeq: 1 });
@@ -231,10 +231,15 @@ test('selected-stop departures refetch once after a genuinely new revision, not 
   assert.equal(fetchCalls.mock.callCount(), 1);
   const first = FakeEventSource.instances[0];
   first.emit('open');
-  first.emit('buses', busesSnapshot({ revision: 1 })); // newer: refetch
+  first.emit('buses', busesSnapshot({ revision: 1 })); // close publication shares the first read
+  await flush();
+  assert.equal(fetchCalls.mock.callCount(), 1);
+  t.mock.timers.tick(5001);
+  first.emit('buses', busesSnapshot({ revision: 2 })); // newer: refetch
   await flush();
   assert.equal(fetchCalls.mock.callCount(), 2);
-  first.emit('buses', busesSnapshot({ revision: 1 })); // duplicate: no refetch
+  t.mock.timers.tick(5001);
+  first.emit('buses', busesSnapshot({ revision: 2 })); // duplicate: no refetch
   first.emit('buses', busesSnapshot({ revision: 0 })); // stale: no refetch
   await flush();
   assert.equal(fetchCalls.mock.callCount(), 2);

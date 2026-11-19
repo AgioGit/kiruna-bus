@@ -57,6 +57,7 @@ export const store = createStore({
   liveQuality: null,
   serviceView: { active: new Set(), complete: false },
   departuresUpdatedAt: null,
+  departuresRetained: false,
 
   errors: {
     config: null,

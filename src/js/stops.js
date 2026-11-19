@@ -1,4 +1,5 @@
-import { api } from './api.js';
+import { api, errorMessage } from './api.js';
+import { message } from './i18n.js';
 import { store } from './appState.js';
 import { onStopSelected, onStopDeselected } from './poller.js';
 import { resetSelectedStopCalls } from './calls.js';
@@ -33,7 +34,7 @@ export function searchStops(query, onResults) {
       onResults(results ?? []);
     } catch (err) {
       if (err.name === 'AbortError' || mySeq !== requestSeq) return;
-      store.set({ errors: { ...store.get().errors, stopNotFound: `Stop search failed: ${err.message}` } });
+      store.set({ errors: { ...store.get().errors, stopNotFound: message('stopSearchFailed', errorMessage(err)) } });
       onResults([]);
     }
   }, DEBOUNCE_MS);
@@ -59,12 +60,12 @@ export async function selectStopByText(stopText) {
   try {
     stop = await api.findStopArea(stopText);
   } catch (err) {
-    if (request === selectionRequest && selectionSeq === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: err.message } });
+    if (request === selectionRequest && selectionSeq === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: errorMessage(err) } });
     return null;
   }
   if (request !== selectionRequest || store.get().stopSelectionSeq !== selectionSeq) return null;
   if (!stop) {
-    store.set({ errors: { ...store.get().errors, stopNotFound: `Stop "${stopText}" was not found.` } });
+    store.set({ errors: { ...store.get().errors, stopNotFound: message('stopMissing', stopText) } });
     return null;
   }
   selectStopArea(stop);
@@ -86,6 +87,8 @@ export function selectStopArea(stop) {
     messages: [],
     isStopCancelled: false,
     isCallsLoading: true,
+    departuresUpdatedAt: null,
+    departuresRetained: false,
     errors: { ...state.errors, calls: null, stopNotFound: null },
   }));
   onStopSelected();

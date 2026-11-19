@@ -1,35 +1,39 @@
-import { api } from './api.js';
+import { departureReadState, readDepartures } from './departure-reads.js';
 import { store } from './appState.js';
 import { addActiveLineIds } from './filters.js';
 import { recordRouteIdsFromCalls } from './routes.js';
 import { CLOCK_SAMPLE_MAX_AGE, now, subscribeClock, synchronizeClock } from './clock.js';
 import { advanceDepartureHistory, effectiveDepartureTime, isPreviousDeparture, observeCalls } from './departure-history.js';
+import { message } from './i18n.js';
 
-let expiryTimer;
+let freshnessTimer;
 let boundaryTimer;
-let expiry = null;
 let history = { previous: null, pending: [] };
 
 export function resetSelectedStopCalls() {
-  clearTimeout(expiryTimer);
+  clearTimeout(freshnessTimer);
   clearTimeout(boundaryTimer);
-  expiry = null;
   history = { previous: null, pending: [] };
 }
 
-function scheduleExpiry() {
-  clearTimeout(expiryTimer);
-  if (!expiry) return;
-  const { sequence, at } = expiry;
-  expiryTimer = setTimeout(() => {
+function scheduleFreshness(sequence, freshUntil, expiresAt) {
+  clearTimeout(freshnessTimer);
+  const elapsed = performance.now();
+  const at = freshUntil > elapsed ? Math.min(freshUntil, expiresAt) : expiresAt;
+  freshnessTimer = setTimeout(() => {
     if (store.get().stopSelectionSeq !== sequence) return;
-    expiry = null;
+    if (performance.now() < expiresAt) {
+      if (performance.now() >= freshUntil) store.set({ departuresRetained: true });
+      scheduleFreshness(sequence, freshUntil, expiresAt);
+      return;
+    }
     store.set({
       calls: [], messages: [], isStopCancelled: false, isCallsLoading: false,
-      errors: { ...store.get().errors, calls: 'Cached departures have expired. Live departures are unavailable.' },
+      departuresUpdatedAt: null, departuresRetained: false,
+      errors: { ...store.get().errors, calls: message('departuresUnavailable') },
     });
-  }, Math.max(0, at + 180000 - now()) + 1);
-  expiryTimer?.unref?.();
+  }, Math.max(1, Math.ceil(at - elapsed)));
+  freshnessTimer?.unref?.();
 }
 
 function updateHistory() {
@@ -45,7 +49,7 @@ function updateHistory() {
   }
 }
 
-subscribeClock(() => { updateHistory(); scheduleExpiry(); });
+subscribeClock(updateHistory);
 // Fetches GetCalls for the currently selected stop. Empty results are a
 // valid "no departures" state, not an error; isStopCancelled/messages are
 // surfaced as-is for the UI layer to render.
@@ -54,10 +58,13 @@ export async function fetchCallsForSelectedStop({ signal, isCurrent = () => true
   if (!selectedStop) return [];
 
   const sequence = store.get().stopSelectionSeq;
-  const resp = await api.getCalls({ stopId: selectedStop.id }, { signal });
+  const read = await readDepartures(selectedStop.id, { signal });
   if (signal?.aborted || !isCurrent() || store.get().stopSelectionSeq !== sequence
     || store.get().selectedStop?.id !== selectedStop.id) return [];
-  const flat = resp.calls;
+  const { response: resp, freshUntil, expiresAt } = read;
+  const readState = departureReadState(read);
+  const available = readState !== 'unavailable';
+  const flat = available ? resp.calls : [];
   synchronizeClock(resp.serverTime, { maxAgeMs: resp[CLOCK_SAMPLE_MAX_AGE] });
   const observations = [
     ...(isPreviousDeparture(resp.previousDeparture) ? [resp.previousDeparture] : []),
@@ -88,16 +95,14 @@ export async function fetchCallsForSelectedStop({ signal, isCurrent = () => true
     calls: flat,
     previousDeparture: history.previous,
     isCallsLoading: false,
-    isStopCancelled: !!resp.isStopCancelled,
-    messages: resp.messages ?? [],
-    departuresUpdatedAt: resp.updatedAt,
-    errors: { ...store.get().errors, calls: resp.state === 'unavailable'
-      ? 'Live departures are unavailable.'
-      : resp.state === 'stale' ? `Cached departures from ${resp.updatedAt}; live refresh unavailable.` : null },
+    isStopCancelled: available && !!resp.isStopCancelled,
+    messages: available ? resp.messages ?? [] : [],
+    departuresUpdatedAt: available ? resp.updatedAt : null,
+    departuresRetained: readState === 'stale',
+    errors: { ...store.get().errors, calls: available ? null : message('departuresUnavailable') },
   });
   updateHistory();
-  const updatedAt = Date.parse(resp.updatedAt);
-  expiry = Number.isFinite(updatedAt) && resp.state !== 'unavailable' ? { sequence, at: updatedAt } : null;
-  scheduleExpiry();
+  if (available) scheduleFreshness(sequence, freshUntil, expiresAt);
+  else clearTimeout(freshnessTimer);
   return flat;
 }

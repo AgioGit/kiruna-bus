@@ -8,6 +8,8 @@ import { routePartsForVisibleRoutes } from './routeOverlap.js';
 import { markerPositionOnRoute, offsetRoutePath, renderedRouteLocations } from './routeOffset.js';
 import { selectVehicle } from './vehicleSelection.js';
 import { routeServiceStatus } from './service.js';
+import { errorMessage } from './api.js';
+import { localizedText, message, subscribeLocale, t } from './i18n.js';
 
 let map = null;
 let tiles = null;
@@ -44,8 +46,7 @@ const ROUTE_PANE = 'routes';
 const STOP_PANE = 'stops';
 const NEXT_STOP_PANE = 'nextStops';
 
-// Assumes the global `L` (Leaflet, loaded via <script> in index.html - see
-// docs/initial_plan.md for why a CDN script tag was used instead of a bundler).
+// Main calls this once the CDN script has loaded the Leaflet global.
 export function initMap(containerId) {
   const cfg = getConfig();
   appliedConfig = cfg;
@@ -54,7 +55,7 @@ export function initMap(containerId) {
   map = L.map(containerId, { minZoom }).setView(KIRUNA_CENTER, KIRUNA_ZOOM);
 
   const tileUrl = cfg?.tiles?.urlTemplate ?? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-  tiles = L.tileLayer(tileUrl, { attribution: '&copy; OpenStreetMap contributors' });
+  tiles = L.tileLayer(tileUrl, { attribution: localizedText('mapContributors') });
   tiles.addTo(map);
 
   // Draw order: tiles, routes, next-stop paths, stops, buses (markerPane).
@@ -80,7 +81,7 @@ export function initMap(containerId) {
         selectStopArea(stops[0]);
       }
     } catch (error) {
-      if (lookup === mapLookupSequence && selection === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: `Nearby stop search failed: ${error.message}` } });
+      if (lookup === mapLookupSequence && selection === store.get().stopSelectionSeq) store.set({ errors: { ...store.get().errors, stopNotFound: message('nearbySearchFailed', errorMessage(error)) } });
     }
   });
   map.on('zoomend', () => {
@@ -96,6 +97,18 @@ export function initMap(containerId) {
     renderVehicles(store.get());
   });
 
+  const translateControls = () => {
+    const controls = map.zoomControl?.getContainer();
+    for (const [selector, key] of [['.leaflet-control-zoom-in', 'zoomIn'], ['.leaflet-control-zoom-out', 'zoomOut']]) {
+      const control = controls?.querySelector(selector);
+      control?.setAttribute('title', t(key));
+      control?.setAttribute('aria-label', t(key));
+    }
+    if (stopMarker) labelSelectedStopMarker(store.get().selectedStop);
+    for (const entry of vehicleMarkers.values()) updateVehicleLabel(entry, entry.labelForLocale());
+  };
+  translateControls();
+  subscribeLocale(translateControls);
   store.subscribe(render);
   render(store.get());
   return map;
@@ -108,7 +121,9 @@ function observeMapSize(container) {
     if (resizeFrame != null) cancelAnimationFrame(resizeFrame);
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = null;
-      map?.invalidateSize({ pan: false });
+      // When the header wraps differently in another language, preserve the
+      // same geographic center rather than anchoring the resized map's corner.
+      map?.invalidateSize({ animate: false });
     });
   };
 
@@ -172,8 +187,14 @@ function renderSelectedStop(state) {
   if (!state.stopLocations.has(stop.id)) {
     stopMarker = L.marker([location.lat, location.lon]).addTo(map);
     stopMarkerId = stop.id;
+    labelSelectedStopMarker(stop);
   }
   map.panTo([location.lat, location.lon]);
+}
+
+function labelSelectedStopMarker(stop) {
+  const element = stopMarker.getElement?.();
+  if (element) element.alt = stop?.text || t('mapMarker');
 }
 
 // Every stop served by any line, drawn as a small circle. Coordinates come
@@ -347,10 +368,12 @@ function renderVehicles(state) {
     }
     const markerStyle = `--vehicle-color: ${color};`;
     const iconKey = `${wrapperClasses.join(' ')}|${markerClasses.join(' ')}|${markerStyle}|${heading}`;
-    const nameLabel =
-      bus.lineId !== undefined ? `${shortLineLabel(bus, state)} → ${bus.destination}` : `Bus (call ${bus.callIds[0]})`;
-    const nextStopLabel = bus.nextStop?.stopText ? ` | next: ${bus.nextStop.stopText}` : '';
-    const label = bus.stale ? `${nameLabel}${nextStopLabel} (stale, ${formatAge(bus.ageMs)} ago)` : `${nameLabel}${nextStopLabel}`;
+    const labelForLocale = () => {
+      const name = bus.lineId !== undefined ? `${shortLineLabel(bus, state)} → ${bus.destination}` : t('genericBus', bus.callIds[0]);
+      const next = bus.nextStop?.stopText ? ` | ${t('nextStopTooltip', bus.nextStop.stopText)}` : '';
+      return bus.stale ? `${name}${next} (${t('oldPositionTooltip', formatAge(bus.ageMs))})` : `${name}${next}`;
+    };
+    const label = labelForLocale();
     let entry = vehicleMarkers.get(key);
     if (!entry) {
       const marker = L.marker(displayPosition, { icon: vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading) });
@@ -365,11 +388,10 @@ function renderVehicles(state) {
         entry.marker.setIcon(vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading));
         entry.iconKey = iconKey;
       }
-      if (entry.label !== label) {
-        entry.marker.setTooltipContent(textTooltip(label));
-        entry.label = label;
-      }
+      updateVehicleLabel(entry, label);
     }
+    entry.labelForLocale = labelForLocale;
+    entry.marker.getElement?.()?.setAttribute('aria-label', label);
 
     entry.marker.setZIndexOffset(isHovered ? 1000 : isSelected ? 500 : 0);
 
@@ -402,6 +424,13 @@ function renderVehicles(state) {
       map.panTo(selectedLatLng);
     }
   }
+}
+
+function updateVehicleLabel(entry, label) {
+  if (entry.label === label) return;
+  entry.marker.setTooltipContent(textTooltip(label));
+  entry.marker.getElement?.()?.setAttribute('aria-label', label);
+  entry.label = label;
 }
 
 function vehicleIcon(wrapperClasses, markerClasses, markerStyle, heading) {
@@ -446,7 +475,7 @@ function formatAge(ageMs) {
 }
 
 function lineTextFor(state, lineId) {
-  return state.lines.find((l) => l.id === lineId)?.text ?? `Line ${lineId}`;
+  return state.lines.find((l) => l.id === lineId)?.text ?? t('line', lineId);
 }
 
 function locationForStopText(state, stopText) {

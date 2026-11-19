@@ -9,6 +9,12 @@ at the server boundary. There is no application build step or database.
 
 ## Features
 
+- Switch between **Svenska** and **English** in the header without reloading.
+  Until you choose a language, the interface uses the first supported language
+  from your browser’s preferences, or English if neither matches. The choice
+  stays in this browser; if storage is blocked, it lasts for this visit only.
+  The language is applied without waiting for the map library. Provider text
+  and names stay unchanged, and times use Stockholm time.
 - Independent traffic information from Lokaltrafiken Kiruna appears above
   departures only when notices exist; on mobile it appears below the map.
   Empty and unavailable status panels are hidden on all screen sizes. All
@@ -79,7 +85,18 @@ at the server boundary. There is no application build step or database.
   and a Near me button. Location is requested only by pressing Near me;
   results persist when closed and the same button can retry. Selecting a
   stop closes the finder and displays its departures, with Clear and
-  Save this stop controls in that departures panel.
+  Save this stop controls in that departures panel. The finder explains how
+  to save a stop when the list is empty.
+- The collapsible Saved stop departures board follows traffic information in
+  the desktop sidebar or below the mobile map. It shows the next two upcoming
+  departures per saved stop after line filtering, with the same line badges
+  as the live bus list. Select a stop on the board to bring its departures
+  panel into view, focus its heading and center the map. The board remembers
+  whether it was collapsed and makes no reads while collapsed or in a hidden
+  tab. Each row shows the forecast time when available, or the planned time
+  otherwise. `(+N min)` is the delay from the plan, not a countdown. Both
+  views mark retained departures as not live and show their last update time.
+  They expire two minutes after that update; unmatched stops stay in your saved list.
 - Live snapshots arrive over server-sent events after shared collection
   cycles (30 seconds by default). If no valid snapshot arrives for 60 seconds,
   the browser requests the cached snapshot over HTTP while reconnecting.
@@ -118,6 +135,9 @@ cd server
 npm ci
 node index.js
 ```
+
+For local development, run `node --watch index.js` from `server` to restart
+the API when backend modules change.
 
 Then open <http://localhost:8080/>. The server serves the frontend from
 `src/` and the API under `/api`. An internet connection is required for

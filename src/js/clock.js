@@ -53,10 +53,3 @@ export function formatTime(isoString) {
     minute: '2-digit',
   }).format(date);
 }
-
-export function minutesUntil(isoString) {
-  if (!isoString) return null;
-  const target = new Date(isoString).getTime();
-  if (Number.isNaN(target)) return null;
-  return Math.round((target - now()) / 60000);
-}

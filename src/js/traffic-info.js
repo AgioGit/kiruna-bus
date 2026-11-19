@@ -1,26 +1,27 @@
 import { api } from './api.js';
 import { store } from './appState.js';
 import { failureDelay } from './poller.js';
+import { formatLocale, subscribeLocale, t } from './i18n.js';
 
 const MAX_AGE_MS = 600000;
 const INTERVAL_MS = 60000;
 const labels = {
-  cancelled: 'Cancelled', no_realtime: 'No real-time information', delayed: 'Delayed',
-  route_changed: 'Route changed', back_in_service: 'Back in service',
+  cancelled: 'cancelled', no_realtime: 'noRealtime', delayed: 'delayed',
+  route_changed: 'routeChanged', back_in_service: 'backInService',
 };
 
 export function formatTrafficDate(value) {
   if (!/^\d{4}-\d\d-\d\d$/.test(value ?? '')) return value ?? '';
   const date = new Date(`${value}T12:00:00Z`);
   if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) return value;
-  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'short', year: 'numeric' }).format(date);
+  return new Intl.DateTimeFormat(formatLocale(), { timeZone: 'Europe/Stockholm', day: 'numeric', month: 'short', year: 'numeric' }).format(date);
 }
 
 export function trafficSummary(data) {
-  if (!data || data.state === 'unavailable') return 'Traffic information unavailable';
+  if (!data || data.state === 'unavailable') return t('trafficUnavailable');
   const count = data.trips.length + data.messages.length;
-  if (data.state === 'retained') return `${count} traffic ${count === 1 ? 'notice' : 'notices'} (refresh failed)`;
-  return count ? `${count} traffic ${count === 1 ? 'notice' : 'notices'}` : 'No known disruptions';
+  if (data.state === 'retained') return t('retainedTrafficCount', count);
+  return count ? t('trafficCount', count) : t('noDisruptions');
 }
 
 function validResponse(data) {
@@ -48,20 +49,20 @@ export function renderTrafficInfo(data, doc = document) {
   panel.classList.toggle('has-traffic-notices', hasNotices);
   if (!hasNotices) return;
   add(content, 'p', trafficSummary(data), data.state === 'retained' ? 'traffic-info-warning' : '');
-  if (data.state === 'retained') add(content, 'p', 'Refresh failed; showing the last available notices until they expire.', 'traffic-info-warning');
+  if (data.state === 'retained') add(content, 'p', t('retainedTraffic'), 'traffic-info-warning');
   if (data && (data.trips.length || data.messages.length)) {
     const list = add(content, 'ul', '');
     for (const trip of data.trips) {
       const delayedReturn = trip.type === 'back_in_service' && trip.delayMinutes > 0 && trip.delayMinutes < 1000;
-      const title = delayedReturn ? 'Delayed (back in service)' : labels[trip.type];
-      const details = [trip.line && `Line ${trip.line}`, trip.destination && `towards ${trip.destination}`,
-        formatTrafficDate(trip.date), trip.time, trip.delayMinutes > 0 && trip.delayMinutes < 1000 && `${trip.delayMinutes} min delay${delayedReturn ? ' at departure' : ''}`,
-        trip.trip && `Trip ${trip.trip}`, trip.updated && `Updated ${trip.updated}`].filter(Boolean);
+      const title = t(delayedReturn ? 'delayedReturn' : labels[trip.type]);
+      const details = [trip.line && t('line', trip.line), trip.destination && t('towards', trip.destination),
+        formatTrafficDate(trip.date), trip.time, trip.delayMinutes > 0 && trip.delayMinutes < 1000 && t(delayedReturn ? 'trafficDepartureDelay' : 'trafficDelay', trip.delayMinutes),
+        trip.trip && t('trip', trip.trip), trip.updated && t('updated', trip.updated)].filter(Boolean);
       add(list, 'li', [title, details.join(' · ')].filter(Boolean).join(': '));
     }
-    for (const item of data.messages) add(list, 'li', `${item.level === 'warning' ? 'Warning' : 'Information'}: ${item.text}`);
+    for (const item of data.messages) add(list, 'li', t(item.level === 'warning' ? 'trafficWarning' : 'trafficInformation', item.text));
   }
-  if (data?.updated) add(content, 'p', `Provider update: ${data.updated}`, 'traffic-info-meta');
+  if (data?.updated) add(content, 'p', t('providerUpdate', data.updated), 'traffic-info-meta');
 }
 
 // This lifecycle is intentionally independent of catalog, SSE and the bus poller.
@@ -131,6 +132,7 @@ export function createTrafficPoller({ get = api.getTrafficInfo, publish = (data)
 export function initTrafficInfo() {
   renderTrafficInfo(store.get().trafficInfo);
   store.subscribe((state, previous) => { if (state.trafficInfo !== previous.trafficInfo) renderTrafficInfo(state.trafficInfo); });
+  subscribeLocale(() => renderTrafficInfo(store.get().trafficInfo));
   const poller = createTrafficPoller();
   if (!document.hidden) poller.resume();
   document.addEventListener('visibilitychange', () => document.hidden ? poller.pause() : poller.resume());

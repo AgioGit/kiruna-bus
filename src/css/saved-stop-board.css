@@ -1,0 +1,127 @@
+.saved-stop-board h2 {
+  margin: 0;
+}
+
+.saved-stop-board h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.saved-stop-board-toggle,
+.saved-stop-board-stop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.saved-stop-board-toggle {
+  padding: 0 0.25rem 0 0;
+}
+
+.saved-stop-board-toggle::after,
+.saved-stop-board-stop::after {
+  flex: none;
+  inline-size: 0.45rem;
+  block-size: 0.45rem;
+  border: solid var(--color-accent-ink);
+  border-width: 0 2px 2px 0;
+  content: "";
+}
+
+.saved-stop-board-toggle::after {
+  transform: rotate(45deg);
+}
+
+.saved-stop-board-toggle[aria-expanded="true"]::after {
+  transform: rotate(225deg);
+}
+
+.saved-stop-board-stop {
+  padding: 0.5rem 0.7rem;
+  border-radius: 7px;
+}
+
+.saved-stop-board-stop::after {
+  transform: rotate(-45deg);
+}
+
+.saved-stop-board-stops,
+.saved-stop-board-departures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.saved-stop-board-stops:not([hidden]) {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.saved-stop-board-card {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.saved-stop-board-card:has(.saved-stop-board-stop[aria-current="true"]) {
+  border-color: var(--color-info);
+  background: var(--color-selected);
+}
+
+.saved-stop-board-card h3 > span {
+  display: block;
+  padding: 0.65rem 0.7rem 0.35rem;
+}
+
+.saved-stop-board-departures {
+  margin: 0 0.7rem 0.2rem;
+}
+
+.saved-stop-board-departure {
+  border-top: 1px solid var(--color-border);
+  padding: 0.4rem 0;
+}
+
+.saved-stop-board-departure .line-badge {
+  max-inline-size: 4.5rem;
+  overflow-wrap: anywhere;
+}
+
+.saved-stop-board-departure .departure-destination {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.saved-stop-board-departure .departure-time {
+  font-size: 1rem;
+}
+
+.saved-stop-board-status {
+  margin: 0 0.7rem 0.45rem;
+  overflow-wrap: anywhere;
+}
+
+.saved-stop-board-status.status-stale {
+  font-size: 0.75rem;
+}
+
+.saved-stop-board-status:empty { display: none; }
+
+@media (hover: hover) {
+  .saved-stop-board-stop:hover {
+    background: var(--color-selected-hover);
+  }
+}

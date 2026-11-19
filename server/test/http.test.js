@@ -281,7 +281,7 @@ test('legacy cold reads wait on one shared collection and preserve the unversion
   assert.equal(collections, 1);
 });
 
-test('failed-stop departures preserve source time and expire only after the exact three-minute boundary', async (t) => {
+test('failed-stop departures preserve source time and expire at the two-minute boundary', async (t) => {
   let time = Date.parse('2026-01-01T12:00:00Z');
   const at = time;
   const app = await serve(t, { now: () => time, tracker: {
@@ -291,14 +291,45 @@ test('failed-stop departures preserve source time and expire only after the exac
   const retained = validate('departures', await (await fetch(url)).json());
   assert.equal(retained.state, 'stale');
   assert.equal(retained.updatedAt, new Date(at).toISOString());
+  assert.equal(retained.freshForMs, 0);
+  assert.equal(retained.expiresInMs, 120000);
   assert.equal(retained.isStopCancelled, true);
-  time += 180000;
+  time += 119999;
   assert.equal((await fetch(url)).status, 200);
   time++;
   const expired = await fetch(url);
   assert.equal(expired.status, 503);
   assert.equal(expired.headers.get('retry-after'), '5');
   assert.equal((await expired.json()).error.code, 'DEPARTURES_UNAVAILABLE');
+});
+
+test('passive departures use wall-clock freshness without activating or extending collection', async (t) => {
+  const at = Date.parse('2026-01-01T12:00:00Z');
+  let time = at + 1000;
+  const providerTime = new Date(at + 3600000).toISOString();
+  const app = await serve(t, { now: () => time, tracker: {
+    serverTime: () => providerTime,
+    getStopCalls: () => ({ calls: [], messages: [], isStopCancelled: false, at }),
+  } });
+  const url = `${app.base}/api/v1/stops/${snapshot.stops[0].id}/departures`;
+  const passive = await fetch(`${url}?mode=passive`);
+  assert.equal(passive.headers.get('x-server-time'), providerTime);
+  const departures = validate('departures', await passive.json());
+  assert.equal(departures.state, 'fresh');
+  assert.equal(departures.freshForMs, settings.dynamicIntervalMs - 1000);
+  assert.equal(departures.expiresInMs, 119000);
+  assert.equal(app.collector.status().lastHttpActivityAt, null);
+  assert.equal((await fetch(`${url}?mode=unknown`)).status, 400);
+  assert.equal((await fetch(`${url}?mode=passive&mode=active`)).status, 400);
+  assert.equal((await fetch(url)).status, 200);
+  const activeAt = app.collector.status().lastHttpActivityAt;
+  assert.equal(activeAt, new Date(time).toISOString());
+  time += 120000;
+  const expired = await fetch(`${url}?mode=passive`);
+  assert.equal(expired.status, 503);
+  assert.equal(expired.headers.get('retry-after'), '5');
+  assert.equal(app.collector.status().lastHttpActivityAt, activeAt);
+  assert.equal(app.collector.status().active, false);
 });
 
 test('expired live calls can expose historical observation without claiming a fresh response', async (t) => {

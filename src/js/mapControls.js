@@ -38,7 +38,8 @@ export function initMapControls() {
     closePanel(true);
   });
   document.addEventListener('pointerdown', (event) => {
-    if (!controls.contains(event.target)) {
+    // The language switch updates the open tool in place.
+    if (!controls.contains(event.target) && !event.target.closest?.('#language-switch')) {
       closePanel(activeTool?.panel.contains(document.activeElement));
     }
   });

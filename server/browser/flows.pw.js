@@ -1020,8 +1020,11 @@ test('selected-stop departures refetch once per genuinely new revision pushed ov
   await page.clock.runFor(350);
   await page.locator('#stop-search-results li').first().click();
   await expect.poll(() => departuresRequests).toBe(1); // immediate fetch on selection
+  await expect(page.locator('#arrivals')).toContainText(/No upcoming departures|Inga kommande avgångar/);
+  await page.clock.runFor(5001); // pass the shared read's calls/GPS coalescing window
   await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 }));
   await expect.poll(() => departuresRequests).toBe(2); // a genuinely new revision while selected
+  await page.clock.runFor(5001);
   await sseEmit(page, 0, 'buses', busesDto(version, { revision: 2 })); // duplicate
   await sseEmit(page, 0, 'buses', busesDto(version, { revision: 1 })); // stale
   await page.waitForTimeout(50);
@@ -1032,19 +1035,27 @@ test('catalog version change pushed over the stream triggers exactly one coalesc
   await installFakeEventSource(page);
   await page.clock.install();
   const version = await fetchCatalogVersion(request);
+  const nextVersion = 'new-catalog-version';
+  let published = false;
   let bootstrapRequests = 0;
   await page.route('**/api/v1/buses', (route) => route.fulfill({ json: busesDto(version, { revision: 1 }) }));
   await page.route('**/api/v1/bootstrap', (route) => {
     bootstrapRequests++;
-    route.continue();
+    return published ? route.fulfill({ json: {
+      catalog: { ...catalog, version: nextVersion }, source: 'bundled', serverTime: new Date().toISOString(),
+    } }) : route.continue();
   });
   await page.goto('/'); // the initial loadConfig() bootstrap fetch is the baseline below
   await expect.poll(() => sseCount(page)).toBe(1);
   const baseline = bootstrapRequests;
   await sseOpen(page, 0);
-  await sseEmit(page, 0, 'buses', busesDto('new-catalog-version', { revision: 2 }));
-  await sseEmit(page, 0, 'buses', busesDto('new-catalog-version', { revision: 3 })); // same new version again
-  await expect.poll(() => bootstrapRequests).toBe(baseline + 1); // coalesced into a single refresh, not one per event
+  published = true;
+  await sseEmit(page, 0, 'buses', busesDto(nextVersion, { revision: 2 }));
+  await sseEmit(page, 0, 'buses', busesDto(nextVersion, { revision: 3 }));
+  await expect.poll(() => page.evaluate(async () =>
+    (await import('/js/appState.js')).store.get().catalogInfo?.version)).toBe(nextVersion);
+  await sseEmit(page, 0, 'buses', busesDto(nextVersion, { revision: 4 }));
+  expect(bootstrapRequests).toBe(baseline + 1);
 });
 
 test('hidden tab closes the stream and cancels timers; resuming opens exactly one fresh stream', async ({ page, request }) => {

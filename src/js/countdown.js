@@ -1,4 +1,5 @@
 import { getLiveVehiclesSchedule } from './poller.js';
+import { subscribeLocale, t } from './i18n.js';
 
 // Shows the live-stream connection/recovery state in the header, in place
 // of the old poll-tick countdown: a healthy SSE connection needs no
@@ -11,14 +12,15 @@ export function initCountdown(elementId = 'refresh-countdown') {
   function update() {
     const { connected, nextFallbackAt } = getLiveVehiclesSchedule();
     if (connected) {
-      el.textContent = '(live updates)';
+      el.textContent = t('liveUpdates');
     } else if (nextFallbackAt != null) {
-      el.textContent = `(reconnecting: ${Math.max(0, Math.ceil((nextFallbackAt - Date.now()) / 1000))}s)`;
+      el.textContent = t('reconnecting', Math.max(0, Math.ceil((nextFallbackAt - Date.now()) / 1000)));
     } else {
-      el.textContent = '(connecting…)';
+      el.textContent = t('connecting');
     }
   }
 
   update();
+  subscribeLocale(update);
   setInterval(update, 1000);
 }

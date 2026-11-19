@@ -21,12 +21,12 @@ test('switching stops clears previous departures and ignores the old response', 
     assert.equal(store.get().isCallsLoading, true);
 
     selectStopArea({ id: 2, text: 'Second (2)' });
-    pending.get(1)({ calls: [{ id: 'old', lineId: 1 }] });
+    pending.get(1)({ calls: [{ id: 'old', lineId: 1 }], updatedAt: new Date().toISOString() });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(store.get().calls, []);
     assert.equal(store.get().isCallsLoading, true);
 
-    pending.get(2)({ calls: [{ id: 'new', lineId: 1 }] });
+    pending.get(2)({ calls: [{ id: 'new', lineId: 1 }], updatedAt: new Date().toISOString() });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(store.get().calls.map((call) => call.id), ['new']);
     assert.equal(store.get().isCallsLoading, false);

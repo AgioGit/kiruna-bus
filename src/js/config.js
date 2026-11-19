@@ -1,9 +1,10 @@
-import { api, ApiError } from './api.js';
+import { api, ApiError, errorMessage } from './api.js';
 import { store } from './appState.js';
 import { addActiveLineIds } from './filters.js';
 import { isCatalog, readCachedCatalog, writeCachedCatalog } from './catalog-cache.js';
 import { CLOCK_SAMPLE_MAX_AGE, synchronizeClock } from './clock.js';
 import { clearSelectedStop } from './stops.js';
+import { message } from './i18n.js';
 
 let current = null;
 let lastAttempt = -Infinity;
@@ -11,7 +12,7 @@ let configOptions = { minZoom: 10, tiles: { urlTemplate: 'https://tile.openstree
 
 function storageError(error) {
   console.warn('Basic-information cache unavailable:', error.message);
-  store.set({ errors: { ...store.get().errors, cache: 'Browser cache unavailable; using server-provided basic information.' } });
+  store.set({ errors: { ...store.get().errors, cache: message('cacheUnavailable') } });
 }
 
 export function applyCatalog(catalog, source) {
@@ -64,7 +65,7 @@ export async function loadConfig() {
   if (cached) {
     applyCatalog(cached, 'browser');
     void refreshBootstrap({ force: true }).catch((error) => {
-      store.set({ errors: { ...store.get().errors, config: error.message } });
+      store.set({ errors: { ...store.get().errors, config: errorMessage(error) } });
     });
   } else {
     await refreshBootstrap({ force: true });

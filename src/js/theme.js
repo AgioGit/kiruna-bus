@@ -1,3 +1,5 @@
+import { subscribeLocale, t } from './i18n.js';
+
 const STORAGE_KEY = 'theme';
 const THEMES = ['light', 'dark'];
 
@@ -22,9 +24,8 @@ export function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const button = document.getElementById('theme-toggle');
   if (button) {
-    const next = theme === 'dark' ? 'light' : 'dark';
-    button.textContent = theme === 'dark' ? '☀ Light' : '☾ Dark';
-    button.setAttribute('aria-label', `Switch to ${next} theme`);
+    button.textContent = t(theme === 'dark' ? 'lightTheme' : 'darkTheme');
+    button.setAttribute('aria-label', t(theme === 'dark' ? 'switchLight' : 'switchDark'));
   }
 }
 
@@ -33,6 +34,7 @@ export function applyTheme(theme) {
 // inline so the first paint is already correct.
 export function initTheme() {
   applyTheme(storedTheme() ?? systemTheme());
+  subscribeLocale(() => applyTheme(currentTheme()));
 
   const query = window.matchMedia?.('(prefers-color-scheme: dark)');
   query?.addEventListener('change', () => {

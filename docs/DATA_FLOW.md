@@ -213,12 +213,19 @@ reconnect and read immediately. Live and selected-stop requests use independent
 generation guards checked before state writes. Basic-information recovery does
 not depend on successful live tracking. A catalog version change triggers
 bootstrap revalidation instead of transferring static geometry in each push.
-Selecting a stop reads departures immediately; newly published dynamic
-revisions refresh the selected stop from the shared server cache.
+The selected stop and the expanded, visible saved-stop board react to accepted
+new dynamic revisions. `departure-reads.js` shares in-flight reads and recent
+responses by stop, coalesces close calls/GPS publications, and applies
+Retry-After and backoff. The board resolves favorites against the local catalog
+and limits parallel reads. Board-initiated reads are passive: they do not
+keep the collector active. Selected-stop reads are active by default unless
+they reuse a board read already in flight or its recent result.
 
 `live-vehicles.js` expires positions between snapshots using server time plus
-monotonic elapsed browser time. `calls.js` consumes flat departures and expires
-their retained display after three minutes. UI status distinguishes cached basic
+monotonic elapsed browser time. Departures expire from a relative retention
+budget computed using server wall-clock data age, not provider-adjusted time;
+the browser measures remaining time monotonically. Only selected-stop detail
+uses the historical observations. UI status distinguishes cached basic
 information, warming/unavailable tracking, partial coverage, stale departures,
 and valid empty results.
 

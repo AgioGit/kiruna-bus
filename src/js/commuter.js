@@ -5,8 +5,9 @@
 //
 import { store } from './appState.js';
 import { selectStopArea, selectStopByText } from './stops.js';
-import { api } from './api.js';
-import { showNotice } from './notices.js';
+import { api, errorMessage } from './api.js';
+import { refreshNotice, showNotice } from './notices.js';
+import { message, subscribeLocale, t } from './i18n.js';
 
 const FAVORITES_STORAGE_KEY = 'kiruna-bus-tracker.favoriteStops.v1';
 const NEARBY_MAX_COUNT = 5;
@@ -17,6 +18,14 @@ const EARTH_RADIUS_M = 6371000;
 // id, since that's the only value both FindStopArea and FindStopsNearLocation
 // results share).
 let favorites = [];
+const favoriteListeners = new Set();
+
+export function getFavoriteStops() { return [...favorites]; }
+
+export function subscribeFavoriteStops(listener) {
+  favoriteListeners.add(listener);
+  return () => favoriteListeners.delete(listener);
+}
 // Guards against acting on a getCurrentPosition callback from a
 // since-superseded "Find nearby stops" press (e.g. a fast double click).
 let nearbyRequestId = 0;
@@ -35,6 +44,11 @@ export function initCommuter() {
 
   lastSyncedSelectionSeq = store.get().stopSelectionSeq ?? 0;
   store.subscribe(handleStoreUpdate);
+  subscribeLocale(() => {
+    renderFavoriteToggle(store.get());
+    refreshNotice(document.getElementById('favorites-status'));
+    refreshNotice(document.getElementById('nearby-stops-status'));
+  });
 }
 
 function handleStoreUpdate(state) {
@@ -67,7 +81,7 @@ function loadFavorites() {
     if (!Array.isArray(parsed)) throw new TypeError('Saved favorites are not a list');
     return sanitizeFavoritesList(parsed);
   } catch {
-    showFavoritesStatus('Saved favorites could not be loaded from browser storage.');
+    showFavoritesStatus(message('favoritesLoadFailed'));
     return [];
   }
 }
@@ -126,10 +140,11 @@ function removeFavorite(text) {
 function persistFavorites() {
   const ok = saveFavorites(favorites);
   showFavoritesStatus(
-    ok ? '' : "Favorites couldn't be saved (browser storage is unavailable) - changes apply to this visit only."
+    ok ? '' : message('favoritesSaveFailed')
   );
   renderFavorites(store.get());
   renderFavoriteToggle(store.get());
+  for (const listener of favoriteListeners) listener();
 }
 
 // ---- Favorites: rendering (safe DOM textContent, no innerHTML) ---------
@@ -137,8 +152,6 @@ function persistFavorites() {
 function renderFavorites(state = store.get()) {
   const list = document.getElementById('favorite-stops-list');
   const empty = document.getElementById('favorite-stops-empty');
-  const section = document.getElementById('saved-stops');
-  if (section) section.hidden = favorites.length === 0 && !state.selectedStop;
   if (empty) empty.hidden = favorites.length > 0;
   if (!list) return;
 
@@ -166,7 +179,9 @@ function renderFavorites(state = store.get()) {
     removeButton.type = 'button';
     removeButton.className = 'favorite-stop-remove';
     removeButton.textContent = '\u2715';
-    removeButton.setAttribute('aria-label', `Remove ${displayStopText(text)} from favorites`);
+    removeButton.setAttribute('aria-label', t('removeFavorite', displayStopText(text)));
+    removeButton.setAttribute('data-i18n-aria-label', 'removeFavorite');
+    removeButton.dataset.i18nArgs = JSON.stringify([displayStopText(text)]);
     removeButton.addEventListener('click', () => removeFavorite(text));
     item.appendChild(removeButton);
 
@@ -182,8 +197,9 @@ function renderFavoriteToggle(state) {
   if (!stop?.text) {
     button.disabled = true;
     button.hidden = true;
-    button.textContent = 'Save this stop';
+    button.textContent = t('saveStop');
     button.setAttribute('aria-pressed', 'false');
+    button.removeAttribute('aria-label');
     return;
   }
 
@@ -191,12 +207,8 @@ function renderFavoriteToggle(state) {
   button.hidden = false;
   button.disabled = false;
   button.setAttribute('aria-pressed', String(isFavorite));
-  button.textContent = isFavorite
-    ? 'Remove saved stop'
-    : 'Save this stop';
-  button.setAttribute('aria-label', isFavorite
-    ? `Remove ${displayStopText(stop.text)} from saved stops`
-    : `Save ${displayStopText(stop.text)} for quick access`);
+  button.textContent = t(isFavorite ? 'removeSavedStop' : 'saveStop');
+  button.setAttribute('aria-label', t(isFavorite ? 'removeStopLabel' : 'saveStopLabel', displayStopText(stop.text)));
 }
 
 function showFavoritesStatus(message) {
@@ -220,12 +232,12 @@ function findNearbyStops() {
   clearNearbyList();
 
   if (!('geolocation' in navigator)) {
-    showNearbyStatus('Geolocation is not supported in this browser.');
+    showNearbyStatus(message('noGeolocation'));
     return;
   }
 
   if (button) button.disabled = true;
-  showNearbyStatus('Locating…', false);
+  showNearbyStatus(message('locating'), false);
 
   try {
     navigator.geolocation.getCurrentPosition(
@@ -234,7 +246,7 @@ function findNearbyStops() {
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
   } catch (error) {
-    showNearbyStatus(`Could not request your location: ${error.message}`);
+    showNearbyStatus(message('locationRequestFailed', errorMessage(error)));
     if (button) button.disabled = false;
   }
 }
@@ -248,7 +260,7 @@ async function onGeolocationSuccess(position, myRequestId, button) {
     renderNearbyStops(stops ?? [], origin);
   } catch (err) {
     if (myRequestId !== nearbyRequestId) return;
-    showNearbyStatus(`Couldn't look up nearby stops: ${err.message}`);
+    showNearbyStatus(message('nearbyLookupFailed', errorMessage(err)));
   } finally {
     if (myRequestId === nearbyRequestId && button) button.disabled = false;
   }
@@ -256,7 +268,7 @@ async function onGeolocationSuccess(position, myRequestId, button) {
 
 function onGeolocationError(error, myRequestId, button) {
   if (myRequestId !== nearbyRequestId) return;
-  showNearbyStatus(geolocationErrorMessage(error));
+  showNearbyStatus(message(geolocationErrorKey(error)));
   if (button) button.disabled = false;
 }
 
@@ -264,15 +276,19 @@ function onGeolocationError(error, myRequestId, button) {
 // unavailability, and timeout each get an explicit, actionable message
 // instead of one generic failure string.
 export function geolocationErrorMessage(error) {
+  return t(geolocationErrorKey(error));
+}
+
+function geolocationErrorKey(error) {
   switch (error?.code) {
     case 1: // PERMISSION_DENIED
-      return 'Location access was denied. Allow location access in your browser settings to find nearby stops.';
+      return 'locationDenied';
     case 2: // POSITION_UNAVAILABLE
-      return 'Your location could not be determined right now.';
+      return 'locationUnavailable';
     case 3: // TIMEOUT
-      return 'Locating your position timed out. Please try again.';
+      return 'locationTimeout';
     default:
-      return 'Could not get your current location.';
+      return 'locationFailed';
   }
 }
 
@@ -287,7 +303,7 @@ function renderNearbyStops(stops, origin) {
   list.textContent = '';
 
   if (!stops.length) {
-    showNearbyStatus('No stops found near your location.');
+    showNearbyStatus(message('noNearby'));
     return;
   }
   showNearbyStatus('');

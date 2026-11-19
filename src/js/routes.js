@@ -1,4 +1,4 @@
-import { api } from './api.js';
+import { api, errorMessage } from './api.js';
 import { store } from './appState.js';
 
 const geometryRequests = new Map();
@@ -27,7 +27,7 @@ export function recordRouteIdsFromCalls(calls) {
         next.set(call.routeId, route);
         store.set({ routeGeometry: next, errors: { ...store.get().errors, routes: null } });
       }).catch((error) => {
-        if ([...store.get().lineRoutes.values()].some((ids) => ids.has(call.routeId))) store.set({ errors: { ...store.get().errors, routes: error.message } });
+        if ([...store.get().lineRoutes.values()].some((ids) => ids.has(call.routeId))) store.set({ errors: { ...store.get().errors, routes: errorMessage(error) } });
       }).finally(() => geometryRequests.delete(call.routeId));
       geometryRequests.set(call.routeId, pending);
     }

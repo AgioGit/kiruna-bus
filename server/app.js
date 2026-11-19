@@ -17,10 +17,9 @@ import { createUpstreamDebug } from './lib/upstreamDebug.js';
 
 const POST_ENDPOINTS = new Set(['/GetStopAreas', '/GetCalls', '/FindStopArea', '/FindStopsNearLocation']);
 // Departures are served from the shared collector's per-stop call cache
-// (never a request-driven upstream lookup). A stop's cached calls remain
-// servable for up to three minutes; past that, departures report 503
-// rather than silently going stale forever.
-const DEPARTURES_MAX_AGE_MS = 3 * 60 * 1000;
+// (never a request-driven upstream lookup). A stop's cached calls expire
+// after two minutes; only departure history can still be returned.
+const DEPARTURES_MAX_AGE_MS = 2 * 60 * 1000;
 const legacyQuery = {
   '/GetConfigOptions': ['profile', 'language'], '/Autocomplete': ['query'],
   '/GetDirections': ['lineId'], '/GetMapRoute': ['routeId'], '/GetVehiclePosition': ['callId'],
@@ -101,12 +100,15 @@ function observationDto(observation) {
   };
 }
 export function departuresDto(entry, { nowMs, freshWithinMs, previousDeparture = null, pendingDepartures = [], unavailable = false }) {
+  const ageMs = Math.max(0, nowMs - entry.at);
   return {
     calls: unavailable ? [] : entry.calls.map(callDto),
     messages: (entry.messages ?? []).map(messageDto),
     isStopCancelled: Boolean(entry.isStopCancelled),
     updatedAt: new Date(entry.at).toISOString(),
-    state: unavailable ? 'unavailable' : !entry.failed && nowMs - entry.at <= freshWithinMs ? 'fresh' : 'stale',
+    state: unavailable ? 'unavailable' : !entry.failed && ageMs <= freshWithinMs ? 'fresh' : 'stale',
+    freshForMs: unavailable || entry.failed ? 0 : Math.max(0, freshWithinMs - ageMs),
+    expiresInMs: unavailable ? 0 : Math.max(0, DEPARTURES_MAX_AGE_MS - ageMs),
     previousDeparture: previousDeparture ? observationDto(previousDeparture) : null,
     pendingDepartures: pendingDepartures.map(observationDto),
   };
@@ -284,17 +286,19 @@ export function createApplication({
       }
       const match = /^\/api\/v1\/stops\/([^/]+)\/departures$/.exec(pathname);
       if (match) {
-        method(['GET']); checkQuery(url);
+        method(['GET']); checkQuery(url, ['mode']);
+        const mode = url.searchParams.get('mode') ?? 'active';
+        if (mode !== 'active' && mode !== 'passive') throw badRequest('mode must be active or passive');
         const id = positiveId(match[1]);
         const stop = catalog.stop(id);
-        collector.noteHttpActivity();
+        if (mode === 'active') collector.noteHttpActivity();
         const entry = tracker.getStopCalls(stop.id);
         const history = tracker.getDepartureHistory?.(stop.id) ??
           { previous: tracker.getPreviousDeparture?.(stop.id) ?? null, pending: [] };
         const previousDeparture = history.previous;
         const pendingDepartures = history.pending;
         const nowMs = now();
-        if (!entry || nowMs - entry.at > DEPARTURES_MAX_AGE_MS) {
+        if (!entry || nowMs - entry.at >= DEPARTURES_MAX_AGE_MS) {
           if (previousDeparture || pendingDepartures.length) {
             return json(200, departuresDto({
               calls: [], messages: [], isStopCancelled: false, at: Date.parse((previousDeparture ?? pendingDepartures[0]).observedAt),
